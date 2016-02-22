@@ -67,6 +67,7 @@ abstract class Optimizer extends RuleExecutor[LogicalPlan] {
       PushPredicateThroughGenerate,
       PushPredicateThroughAggregate,
       // LimitPushDown, // Disabled until we have whole-stage codegen for limit
+      CollapseSorts,
       ColumnPruning,
       // Operator combine
       CollapseRepartition,
@@ -469,6 +470,17 @@ object CollapseRepartition extends Rule[LogicalPlan] {
 }
 
 /**
+  * Combines two adjacent [[Sort]] operators and collapse it into one if possible.
+  * Keep the last sort
+  */
+object CollapseSorts extends Rule[LogicalPlan] {
+  def apply(plan: LogicalPlan): LogicalPlan = plan transform {
+    case ss @ Sort( _, globalOrder, ns @ Sort ( _, g, grandChild))
+      if globalOrder == g => Sort(ss.order, globalOrder, grandChild)
+  }
+}
+
+/**
  * Simplifies LIKE expressions that do not need full regular expressions to evaluate the condition.
  * For example, when the expression is just checking to see if a string starts with a given
  * pattern.
@@ -756,6 +768,7 @@ object CombineFilters extends Rule[LogicalPlan] {
     case ff @ Filter(fc, nf @ Filter(nc, grandChild)) => Filter(And(nc, fc), grandChild)
   }
 }
+
 
 /**
  * Removes filters that can be evaluated trivially.  This is done either by eliding the filter for
