@@ -31,12 +31,9 @@ class CollapseSortsSuite extends PlanTest {
   object Optimize extends RuleExecutor[LogicalPlan] {
     val batches =
       Batch("Collapse Sorts", FixedPoint(10),
-        CollapseSorts) ::
-        Batch("Constant Folding", FixedPoint(10),
-          NullPropagation,
-          ConstantFolding,
-          BooleanSimplification,
-          SimplifyConditionals) :: Nil
+        CollapseSorts,
+        CollapseProject,
+        CombineLimits) :: Nil
   }
 
   val testRelation = LocalRelation('a.int, 'b.int, 'c.int)
@@ -57,7 +54,7 @@ class CollapseSortsSuite extends PlanTest {
   }
 
 
-  test("sorts: combines two sorts project subset") {
+  test("collapsesorts: combines two sorts project subset") {
     val originalQuery =
       testRelation
         .select('a, 'b, 'c)
@@ -73,7 +70,7 @@ class CollapseSortsSuite extends PlanTest {
     comparePlans(optimized, correctAnswer)
   }
 
-  test("combinesorts: select has all columns used in sort, desc") {
+  test("collapsesorts: select has all columns used in sort, desc") {
     val originalQuery =
       testRelation
         .select('a, 'b)
@@ -88,7 +85,7 @@ class CollapseSortsSuite extends PlanTest {
     comparePlans(optimized, correctAnswer)
   }
 
-  test("combinesorts:  multiple sorts") {
+  test("collapsesorts: multiple sorts") {
     val originalQuery =
       testRelation
         .select('a, 'b)
@@ -104,7 +101,9 @@ class CollapseSortsSuite extends PlanTest {
     comparePlans(optimized, correctAnswer)
   }
 
-  test("combinesorts: will _NOT_ kick in because of Analyzer ResolveSortReferences ") {
+  // Project will be introduced as part of Analyzer ResolveSortReferences. Test to ensure
+  // that sorts are collapsed.
+  test("collapsesorts: sorts will be collapsed even with project introduced in between") {
     val originalQuery =
       testRelation
         .select('a)
@@ -115,8 +114,69 @@ class CollapseSortsSuite extends PlanTest {
     val correctAnswer =
       testRelation
         .select('a)
-        .orderBy('b.desc, 'a.asc)
         .orderBy('a.asc).analyze
+    comparePlans(optimized, correctAnswer)
+  }
+
+  test("collapsesorts: test collapsesorts in sort <- project <- sort scenario") {
+    val originalQuery =
+      testRelation
+        .orderBy('b.desc, 'a.asc)
+        .select('a, 'c)
+        .orderBy('c.asc)
+    val optimized = Optimize.execute(originalQuery.analyze)
+
+    val correctAnswer =
+      testRelation
+        .select('a, 'c)
+        .orderBy('c.asc).analyze
+    comparePlans(optimized, correctAnswer)
+  }
+
+  test("collapsesorts: test collapsesorts in sort <- limit <- sort scenario") {
+    val originalQuery =
+      testRelation
+        .orderBy('b.desc, 'a.asc)
+        .limit(2)
+        .orderBy('c.asc)
+        .select('a)
+    val optimized = Optimize.execute(originalQuery.analyze)
+    // Check there is only one Sort
+    assert(optimized.toString.split("Sort").length == 2)
+  }
+
+  test("collapsesorts: test collapsesorts in sort <- filter <- sort scenario") {
+    val originalQuery =
+      testRelation
+        .orderBy('b.desc, 'a.asc)
+        .where('c > 1)
+        .orderBy('c.asc)
+        .select('a, 'b, 'c, 'd)
+    val optimized = Optimize.execute(originalQuery.analyze)
+
+    val correctAnswer =
+      testRelation
+        .where('c > 1)
+        .orderBy('c.asc)
+        .select('a, 'b, 'c, 'd).analyze
+    comparePlans(optimized, correctAnswer)
+  }
+
+  test("collapsesorts: collapsesorts will not be exercised, global in sortBy is false") {
+    val originalQuery =
+      testRelation
+        .sortBy('b.desc, 'a.asc)
+        .where('c > 1)
+        .orderBy('c.asc)
+        .select('a, 'b, 'c, 'd)
+    val optimized = Optimize.execute(originalQuery.analyze)
+
+    val correctAnswer =
+      testRelation
+        .sortBy('b.desc, 'a.asc)
+        .where('c > 1)
+        .orderBy('c.asc)
+        .select('a, 'b, 'c, 'd).analyze
     comparePlans(optimized, correctAnswer)
   }
 

@@ -404,19 +404,5 @@ class DataFrameAggregateSuite extends QueryTest with SharedSQLContext {
         expr("skewness(a)"),
         expr("kurtosis(a)")),
       Row(null, null, null, null, null))
-  }
-
-
-
-  test("collapsesorts") {
-    val mytest = Seq((1, 10), (1, 20), (1, 30), (1, 10), (1, 20), (2, 30), (2, 40), (3, 10),
-      (3, 20)).toDF("a", "b")
-    mytest.rollup($"a" + $"b", $"b", $"a").agg(sum($"a" - $"b")).orderBy('b.asc).
-      orderBy($"a".asc).explain(true)
-
-    val optPlan = mytest.rollup($"a", $"b").agg(sum($"a" + $"b")).orderBy('b.asc).
-      orderBy($"a".asc).queryExecution.optimizedPlan.toString
-    assert(optPlan.split("Sort").length == 2)
-  }
-
+  } 
 }
