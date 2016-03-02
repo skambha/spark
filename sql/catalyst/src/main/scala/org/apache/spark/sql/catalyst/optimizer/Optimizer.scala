@@ -470,11 +470,11 @@ object CollapseRepartition extends Rule[LogicalPlan] {
 }
 
 /**
-  * Collapse two adjacent [[Sort]] operators into one if possible. Keep the last sort
-  * This rule applies to the scenario where the global is same for the Sort nodes and then
-  * either a) The sorts are adjacent or b) In between two Sort nodes, there is a Filter or
-  * a Project or a Limit
-  */
+ * Collapse two adjacent [[Sort]] operators into one if possible. Keep the last sort
+ * This rule applies to the scenario where the global is same for the Sort nodes and then
+ * either a) The sorts are adjacent or b) In between two Sort nodes, there is a Filter or
+ * a Project or a Limit
+ */
 object CollapseSorts extends Rule[LogicalPlan] {
   def apply(plan: LogicalPlan): LogicalPlan = plan transform {
     case ss @ Sort( _, globalOrder, ns @ Sort ( _, g, grandChild))
