@@ -104,7 +104,7 @@ case class Generate(
   def qualifiedGeneratorOutput: Seq[Attribute] = {
     val qualifiedOutput = qualifier.map { q =>
       // prepend the new qualifier to the existed one
-      generatorOutput.map(a => a.withQualifier(Some(q)))
+      generatorOutput.map(a => a.withQualifier(Some(Seq(q))))
     }.getOrElse(generatorOutput)
     val nullableOutput = qualifiedOutput.map {
       // if outer, make all attributes nullable, otherwise keep existing nullability
@@ -762,10 +762,14 @@ case class LocalLimit(limitExpr: Expression, child: LogicalPlan) extends UnaryNo
 case class SubqueryAlias(
     alias: String,
     child: LogicalPlan,
-    view: Option[TableIdentifier])
+    view: Option[TableIdentifier],
+    qualifier: Option[Seq[String]])
   extends UnaryNode {
 
-  override def output: Seq[Attribute] = child.output.map(_.withQualifier(Some(alias)))
+  override def output: Seq[Attribute] = {
+    val qualifierList = if (qualifier.isDefined) qualifier.get else Seq(alias)
+    child.output.map(_.withQualifier(Option(qualifierList)))
+  }
 }
 
 /**

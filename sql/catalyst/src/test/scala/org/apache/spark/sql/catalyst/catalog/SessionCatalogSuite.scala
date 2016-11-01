@@ -434,24 +434,27 @@ class SessionCatalogSuite extends PlanTest {
     sessionCatalog.setCurrentDatabase("db2")
     // If we explicitly specify the database, we'll look up the relation in that database
     assert(sessionCatalog.lookupRelation(TableIdentifier("tbl1", Some("db2")))
-      == SubqueryAlias("tbl1", SimpleCatalogRelation(metastoreTable1), None))
+      == SubqueryAlias(
+        "tbl1", SimpleCatalogRelation(metastoreTable1), None, Option(Seq("db2", "tbl1"))))
     // Otherwise, we'll first look up a temporary table with the same name
     assert(sessionCatalog.lookupRelation(TableIdentifier("tbl1"))
-      == SubqueryAlias("tbl1", tempTable1, None))
+      == SubqueryAlias("tbl1", tempTable1, None, None))
     // Then, if that does not exist, look up the relation in the current database
     sessionCatalog.dropTable(TableIdentifier("tbl1"), ignoreIfNotExists = false, purge = false)
     assert(sessionCatalog.lookupRelation(TableIdentifier("tbl1"))
-      == SubqueryAlias("tbl1", SimpleCatalogRelation(metastoreTable1), None))
+      == SubqueryAlias(
+        "tbl1", SimpleCatalogRelation(metastoreTable1), None, Option(Seq("db2", "tbl1"))))
   }
 
   test("lookup table relation with alias") {
     val catalog = new SessionCatalog(newBasicCatalog())
     val alias = "monster"
     val tableMetadata = catalog.getTableMetadata(TableIdentifier("tbl1", Some("db2")))
-    val relation = SubqueryAlias("tbl1", SimpleCatalogRelation(tableMetadata), None)
+    val relation = SubqueryAlias(
+      "tbl1", SimpleCatalogRelation(tableMetadata), None, Option(Seq("db2", "tbl1")))
     val relationWithAlias =
       SubqueryAlias(alias,
-        SimpleCatalogRelation(tableMetadata), None)
+        SimpleCatalogRelation(tableMetadata), None, None)
     assert(catalog.lookupRelation(
       TableIdentifier("tbl1", Some("db2")), alias = None) == relation)
     assert(catalog.lookupRelation(
@@ -463,7 +466,7 @@ class SessionCatalogSuite extends PlanTest {
     val tmpView = Range(1, 10, 2, 10)
     catalog.createTempView("vw1", tmpView, overrideIfExists = false)
     val plan = catalog.lookupRelation(TableIdentifier("vw1"), Option("range"))
-    assert(plan == SubqueryAlias("range", tmpView, None))
+    assert(plan == SubqueryAlias("range", tmpView, None, None))
   }
 
   test("look up view relation") {
@@ -476,11 +479,12 @@ class SessionCatalogSuite extends PlanTest {
     val view = View(desc = metadata, output = metadata.schema.toAttributes,
       child = CatalystSqlParser.parsePlan(metadata.viewText.get))
     comparePlans(sessionCatalog.lookupRelation(TableIdentifier("view1", Some("db3"))),
-      SubqueryAlias("view1", view, Some(TableIdentifier("view1", Some("db3")))))
+      SubqueryAlias("view1", view, Some(TableIdentifier("view1", Some("db3"))),
+      Some(Seq("db3", "view1"))))
     // Look up a view using current database of the session catalog.
     sessionCatalog.setCurrentDatabase("db3")
     comparePlans(sessionCatalog.lookupRelation(TableIdentifier("view1")),
-      SubqueryAlias("view1", view, Some(TableIdentifier("view1", Some("db3")))))
+      SubqueryAlias("view1", view, Some(TableIdentifier("view1", Some("db3"))), Some(Seq("db3", "view1"))))
   }
 
   test("table exists") {

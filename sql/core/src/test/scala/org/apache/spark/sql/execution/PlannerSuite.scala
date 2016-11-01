@@ -424,7 +424,7 @@ class PlannerSuite extends SharedSQLContext {
         dataType = LongType,
         nullable = false
       ) (exprId = exprId,
-        qualifier = Some("col1_qualifier")
+        qualifier = Some(Seq("col1_qualifier"))
       )
 
     val attribute2 =

@@ -91,12 +91,12 @@ case class UnresolvedAttribute(nameParts: Seq[String]) extends Attribute with Un
   override def exprId: ExprId = throw new UnresolvedException(this, "exprId")
   override def dataType: DataType = throw new UnresolvedException(this, "dataType")
   override def nullable: Boolean = throw new UnresolvedException(this, "nullable")
-  override def qualifier: Option[String] = throw new UnresolvedException(this, "qualifier")
+  override def qualifier: Option[Seq[String]] = throw new UnresolvedException(this, "qualifier")
   override lazy val resolved = false
 
   override def newInstance(): UnresolvedAttribute = this
   override def withNullability(newNullability: Boolean): UnresolvedAttribute = this
-  override def withQualifier(newQualifier: Option[String]): UnresolvedAttribute = this
+  override def withQualifier(newQualifier: Option[Seq[String]]): UnresolvedAttribute = this
   override def withName(newName: String): UnresolvedAttribute = UnresolvedAttribute.quoted(newName)
   override def withMetadata(newMetadata: Metadata): Attribute = this
 
@@ -224,7 +224,7 @@ abstract class Star extends LeafExpression with NamedExpression {
   override def exprId: ExprId = throw new UnresolvedException(this, "exprId")
   override def dataType: DataType = throw new UnresolvedException(this, "dataType")
   override def nullable: Boolean = throw new UnresolvedException(this, "nullable")
-  override def qualifier: Option[String] = throw new UnresolvedException(this, "qualifier")
+  override def qualifier: Option[Seq[String]] = throw new UnresolvedException(this, "qualifier")
   override def toAttribute: Attribute = throw new UnresolvedException(this, "toAttribute")
   override def newInstance(): NamedExpression = throw new UnresolvedException(this, "newInstance")
   override lazy val resolved = false
@@ -246,17 +246,34 @@ abstract class Star extends LeafExpression with NamedExpression {
  */
 case class UnresolvedStar(target: Option[Seq[String]]) extends Star with Unevaluable {
 
-  override def expand(input: LogicalPlan, resolver: Resolver): Seq[NamedExpression] = {
+  def matchedQualifier(
+      attribute: Attribute,
+      nameParts: Seq[String],
+      resolver: Resolver): Boolean = {
+    val qualifierList = if (attribute.qualifier.isDefined) attribute.qualifier.get else Seq.empty
+
+    val matched = if (nameParts.size == qualifierList.size) {
+      (nameParts corresponds qualifierList) (resolver(_, _))
+    } else {
+      if ( qualifierList.size > 1) {
+        resolver(nameParts(0), qualifierList.last)
+      } else {
+        false
+      }
+    }
+
+    matched
+  }
+
+  override def expand(
+      input: LogicalPlan,
+      resolver: Resolver): Seq[NamedExpression] = {
     // If there is no table specified, use all input attributes.
     if (target.isEmpty) return input.output
 
-    val expandedAttributes =
-      if (target.get.size == 1) {
-        // If there is a table, pick out attributes that are part of this table.
-        input.output.filter(_.qualifier.exists(resolver(_, target.get.head)))
-      } else {
-        List()
-      }
+    val expandedAttributes = input.output.filter (x =>
+      matchedQualifier(x, target.get, resolver))
+
     if (expandedAttributes.nonEmpty) return expandedAttributes
 
     // Try to resolve it as a struct expansion. If there is a conflict and both are possible,
@@ -306,7 +323,7 @@ case class MultiAlias(child: Expression, names: Seq[String])
 
   override def nullable: Boolean = throw new UnresolvedException(this, "nullable")
 
-  override def qualifier: Option[String] = throw new UnresolvedException(this, "qualifier")
+  override def qualifier: Option[Seq[String]] = throw new UnresolvedException(this, "qualifier")
 
   override def toAttribute: Attribute = throw new UnresolvedException(this, "toAttribute")
 
@@ -326,7 +343,9 @@ case class MultiAlias(child: Expression, names: Seq[String])
  */
 case class ResolvedStar(expressions: Seq[NamedExpression]) extends Star with Unevaluable {
   override def newInstance(): NamedExpression = throw new UnresolvedException(this, "newInstance")
-  override def expand(input: LogicalPlan, resolver: Resolver): Seq[NamedExpression] = expressions
+  override def expand(
+      input: LogicalPlan,
+      resolver: Resolver): Seq[NamedExpression] = expressions
   override def toString: String = expressions.mkString("ResolvedStar(", ", ", ")")
 }
 
@@ -364,7 +383,7 @@ case class UnresolvedAlias(
   extends UnaryExpression with NamedExpression with Unevaluable {
 
   override def toAttribute: Attribute = throw new UnresolvedException(this, "toAttribute")
-  override def qualifier: Option[String] = throw new UnresolvedException(this, "qualifier")
+  override def qualifier: Option[Seq[String]] = throw new UnresolvedException(this, "qualifier")
   override def exprId: ExprId = throw new UnresolvedException(this, "exprId")
   override def nullable: Boolean = throw new UnresolvedException(this, "nullable")
   override def dataType: DataType = throw new UnresolvedException(this, "dataType")

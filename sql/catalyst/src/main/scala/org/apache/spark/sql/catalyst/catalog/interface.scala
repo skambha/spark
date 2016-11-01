@@ -374,7 +374,7 @@ case class SimpleCatalogRelation(
   override val output: Seq[Attribute] = {
     val (partCols, dataCols) = metadata.schema.toAttributes
       // Since data can be dumped in randomly with no validation, everything is nullable.
-      .map(_.withNullability(true).withQualifier(Some(metadata.identifier.table)))
+      .map(_.withNullability(true).withQualifier(Some(Seq(metadata.identifier.table))))
       .partition { a =>
         metadata.partitionColumnNames.contains(a.name)
       }

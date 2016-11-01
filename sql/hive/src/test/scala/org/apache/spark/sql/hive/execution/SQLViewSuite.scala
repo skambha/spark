@@ -48,6 +48,17 @@ class SQLViewSuite extends QueryTest with SQLTestUtils with TestHiveSingleton {
     }
   }
 
+  test("column resolution scenarios with local temp view") {
+    val df = Seq(2).toDF("i1")
+    df.createOrReplaceTempView("table1")
+    withTempView("table1") {
+      checkAnswer(spark.sql("select table1.* from table1"), Row(2))
+      checkAnswer(spark.sql("select * from table1"), Row(2))
+      checkAnswer(spark.sql("select i1 from table1"), Row(2))
+      checkAnswer(spark.sql("select table1.i1 from table1"), Row(2))
+    }
+  }
+
   test("create a temp view on a permanent view") {
     withView("jtv1", "temp_jtv1") {
       sql("CREATE VIEW jtv1 AS SELECT * FROM jt WHERE id > 3")
@@ -550,7 +561,7 @@ class SQLViewSuite extends QueryTest with SQLTestUtils with TestHiveSingleton {
 
   test("correctly resolve a nested view") {
     withTempDatabase { db =>
-      withView(s"$db.view1", s"$db.view2") {
+      withView(s"$db.view2", s"$db.view1") {
         val view1 = CatalogTable(
           identifier = TableIdentifier("view1", Some(db)),
           tableType = CatalogTableType.VIEW,
@@ -575,6 +586,47 @@ class SQLViewSuite extends QueryTest with SQLTestUtils with TestHiveSingleton {
           hiveContext.sessionState.catalog.createTable(view1, ignoreIfExists = false)
           hiveContext.sessionState.catalog.createTable(view2, ignoreIfExists = false)
           checkAnswer(sql("SELECT * FROM view2 ORDER BY id"), (1 to 9).map(i => Row(i, i)))
+        }
+      }
+    }
+  }
+
+  test("correctly resolve a nested view - with 3 part column name") {
+    withTempDatabase { db =>
+      withView(s"$db.view1", s"$db.view2") {
+        val view1 = CatalogTable(
+          identifier = TableIdentifier("view1", Some(db)),
+          tableType = CatalogTableType.VIEW,
+          storage = CatalogStorageFormat.empty,
+          schema = new StructType().add("id", "long").add("id1", "long"),
+          viewOriginalText = Some("SELECT * FROM jt"),
+          viewText = Some("SELECT * FROM jt"),
+          properties = Map(CatalogTable.VIEW_DEFAULT_DATABASE -> "default"))
+        val view2 = CatalogTable(
+          identifier = TableIdentifier("view2", Some(db)),
+          tableType = CatalogTableType.VIEW,
+          storage = CatalogStorageFormat.empty,
+          schema = new StructType().add("id", "long").add("id1", "long"),
+          viewOriginalText = Some("SELECT * FROM view1"),
+          viewText = Some("SELECT * FROM view1"),
+          properties = Map(CatalogTable.VIEW_DEFAULT_DATABASE -> db))
+        activateDatabase(db) {
+          hiveContext.sessionState.catalog.createTable(view1, ignoreIfExists = false)
+          hiveContext.sessionState.catalog.createTable(view2, ignoreIfExists = false)
+          checkAnswer(sql("SELECT id,id1 FROM view2 ORDER BY id"), (1 to 9).map(i => Row(i, i)))
+          checkAnswer(sql(s"SELECT id,id1 FROM $db.view2 ORDER BY id"),
+            (1 to 9).map(i => Row(i, i)))
+          checkAnswer(sql(s"SELECT view2.id,view2.id1 FROM $db.view2 ORDER BY id"),
+            (1 to 9).map(i => Row(i, i)))
+          checkAnswer(sql(s"SELECT $db.view2.id,$db.view2.id1 FROM $db.view2 ORDER BY id"),
+            (1 to 9).map(i => Row(i, i)))
+          checkAnswer(sql("SELECT id,id1 FROM view1 ORDER BY id"), (1 to 9).map(i => Row(i, i)))
+          checkAnswer(sql(s"SELECT id,id1 FROM $db.view1 ORDER BY id"),
+            (1 to 9).map(i => Row(i, i)))
+          checkAnswer(sql(s"SELECT view1.id,view1.id1 FROM $db.view1 ORDER BY id"),
+            (1 to 9).map(i => Row(i, i)))
+          checkAnswer(sql(s"SELECT $db.view1.id,$db.view1.id1 FROM $db.view1 ORDER BY id"),
+            (1 to 9).map(i => Row(i, i)))
         }
       }
     }

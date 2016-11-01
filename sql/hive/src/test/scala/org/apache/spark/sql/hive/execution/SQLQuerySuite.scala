@@ -17,7 +17,8 @@
 
 package org.apache.spark.sql.hive.execution
 
-import java.io.File
+
+import java.io.{File, PrintWriter}
 import java.nio.charset.StandardCharsets
 import java.sql.{Date, Timestamp}
 
@@ -1030,7 +1031,7 @@ class SQLQuerySuite extends QueryTest with SQLTestUtils with TestHiveSingleton {
     withSQLConf(SQLConf.CONVERT_CTAS.key -> "false") {
       sql("CREATE TABLE explodeTest (key bigInt)")
       table("explodeTest").queryExecution.analyzed match {
-        case SubqueryAlias(_, r: MetastoreRelation, _) => // OK
+        case SubqueryAlias(_, r: MetastoreRelation, _, _) => // OK
         case _ =>
           fail("To correctly test the fix of SPARK-5875, explodeTest should be a MetastoreRelation")
       }

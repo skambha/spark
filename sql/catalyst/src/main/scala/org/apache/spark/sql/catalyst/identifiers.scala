@@ -60,6 +60,11 @@ case class TableIdentifier(table: String, database: Option[String])
   override val identifier: String = table
 
   def this(table: String) = this(table, None)
+
+  def toSeq(): Seq[String] = {
+    if (database.isDefined) Seq(database.get, table) else Seq(table)
+  }
+
 }
 
 /** A fully qualified identifier for a table (i.e., database.tableName) */

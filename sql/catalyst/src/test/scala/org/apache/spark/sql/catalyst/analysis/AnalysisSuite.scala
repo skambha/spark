@@ -372,8 +372,8 @@ class AnalysisSuite extends AnalysisTest with ShouldMatchers {
     val query =
       Project(Seq($"x.key", $"y.key"),
         Join(
-          Project(Seq($"x.key"), SubqueryAlias("x", input, None)),
-          Project(Seq($"y.key"), SubqueryAlias("y", input, None)),
+          Project(Seq($"x.key"), SubqueryAlias("x", input, None, None)),
+          Project(Seq($"y.key"), SubqueryAlias("y", input, None, None)),
           Cross, None))
 
     assertAnalysisSuccess(query)

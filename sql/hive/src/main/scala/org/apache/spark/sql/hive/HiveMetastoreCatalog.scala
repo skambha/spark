@@ -257,7 +257,7 @@ private[hive] class HiveMetastoreCatalog(sparkSession: SparkSession) extends Log
         // Read path
         case relation: MetastoreRelation if shouldConvertMetastoreParquet(relation) =>
           val parquetRelation = convertToParquetRelation(relation)
-          SubqueryAlias(relation.tableName, parquetRelation, None)
+          SubqueryAlias(relation.tableName, parquetRelation, None, None)
       }
     }
   }
@@ -291,7 +291,7 @@ private[hive] class HiveMetastoreCatalog(sparkSession: SparkSession) extends Log
         // Read path
         case relation: MetastoreRelation if shouldConvertMetastoreOrc(relation) =>
           val orcRelation = convertToOrcRelation(relation)
-          SubqueryAlias(relation.tableName, orcRelation, None)
+          SubqueryAlias(relation.tableName, orcRelation, None, None)
       }
     }
   }

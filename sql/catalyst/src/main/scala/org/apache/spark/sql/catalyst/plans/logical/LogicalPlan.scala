@@ -192,8 +192,8 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
   /**
    * Resolve the given `name` string against the given attribute, returning either 0 or 1 match.
    *
-   * This assumes `name` has multiple parts, where the 1st part is a qualifier
-   * (i.e. table name, alias, or subquery alias).
+   * This assumes `name` has multiple parts, where parts of the name is a qualifier
+   * (i.e. db.table, table name, alias, or subquery alias).
    * See the comment above `candidates` variable in resolve() for semantics the returned data.
    */
   private def resolveAsTableColumn(
@@ -201,13 +201,45 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
       resolver: Resolver,
       attribute: Attribute): Option[(Attribute, List[String])] = {
     assert(nameParts.length > 1)
-    if (attribute.qualifier.exists(resolver(_, nameParts.head))) {
-      // At least one qualifier matches. See if remaining parts match.
-      val remainingParts = nameParts.tail
-      resolveAsColumn(remainingParts, resolver, attribute)
-    } else {
-      None
+
+    val qualifiers = if (attribute.qualifier.isDefined) attribute.qualifier.get else Seq.empty
+    if ( qualifiers.isEmpty ) return None
+
+    // Get the qualifier match.
+    // Step1: Match full qualifier.
+    var i = 0
+    var result: Option[(Attribute, List[String])] = {
+
+      val qualifiersMatch = qualifiers.zip(nameParts).forall({ case(qualifierPart, namePart) =>
+        resolver(qualifierPart, namePart)})
+
+      if (qualifiersMatch) {
+        val remainingPortion = if (nameParts.size > qualifiers.size) {
+          qualifiers.size
+        } else {
+          nameParts.size
+        }
+
+        val remainingParts = nameParts.slice(remainingPortion, nameParts.size)
+        resolveAsColumn(remainingParts, resolver, attribute)
+      } else {
+        None
+      }
     }
+
+    if (result.isEmpty) {
+      // test that the qualifier is same as the last qualifier.
+      result = {
+        if (resolver(nameParts(0), qualifiers.last)) {
+          resolveAsColumn(nameParts.slice(1, nameParts.length), resolver, attribute)
+        }
+        else {
+          None
+        }
+      }
+    }
+
+    result
   }
 
   /**
@@ -220,7 +252,7 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
       nameParts: Seq[String],
       resolver: Resolver,
       attribute: Attribute): Option[(Attribute, List[String])] = {
-    if (!attribute.isGenerated && resolver(attribute.name, nameParts.head)) {
+    if (!attribute.isGenerated && !nameParts.isEmpty && resolver(attribute.name, nameParts.head)) {
       Option((attribute.withName(nameParts.head), nameParts.tail.toList))
     } else {
       None

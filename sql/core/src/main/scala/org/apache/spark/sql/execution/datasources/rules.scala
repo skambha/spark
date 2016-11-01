@@ -53,7 +53,7 @@ class ResolveSQLOnFile(sparkSession: SparkSession) extends Rule[LogicalPlan] {
             s"${u.tableIdentifier.database.get}")
         }
         val plan = LogicalRelation(dataSource.resolveRelation())
-        u.alias.map(a => SubqueryAlias(a, plan, None)).getOrElse(plan)
+        u.alias.map(a => SubqueryAlias(u.alias.get, plan, None, None)).getOrElse(plan)
       } catch {
         case _: ClassNotFoundException => u
         case e: Exception =>

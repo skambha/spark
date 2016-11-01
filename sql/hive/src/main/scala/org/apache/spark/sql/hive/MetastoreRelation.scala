@@ -141,7 +141,7 @@ private[hive] case class MetastoreRelation(
       f.dataType,
       // Since data can be dumped in randomly with no validation, everything is nullable.
       nullable = true
-    )(qualifier = Some(tableName))
+    )(qualifier = Option(Seq(tableName)))
   }
 
   /** PartitionKey attributes */

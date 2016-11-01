@@ -150,6 +150,21 @@ class GlobalTempViewSuite extends QueryTest with SharedSQLContext {
     }
   }
 
+  test("column resolution scenarios with global temp view") {
+    val df = Seq(1).toDF("i1")
+    df.createGlobalTempView("t1")
+    try {
+      checkAnswer(spark.sql(s"select * from ${globalTempDB}.t1"), Row(1))
+      checkAnswer(spark.sql(s"select ${globalTempDB}.t1.* from ${globalTempDB}.t1"), Row(1))
+      checkAnswer(spark.sql(s"select i1 from ${globalTempDB}.t1"), Row(1))
+      checkAnswer(spark.sql(s"select ${globalTempDB}.t1.i1 from ${globalTempDB}.t1"), Row(1))
+
+      checkAnswer(spark.sql(s"select t1.i1 from ${globalTempDB}.t1"), Row(1))
+    } finally {
+      spark.catalog.dropGlobalTempView("t1")
+    }
+  }
+
   test("public Catalog should recognize global temp view") {
     try {
       sql("CREATE GLOBAL TEMP VIEW src AS SELECT 1, 2")
