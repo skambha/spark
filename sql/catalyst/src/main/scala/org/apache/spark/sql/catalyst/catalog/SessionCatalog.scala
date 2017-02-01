@@ -595,7 +595,8 @@ class SessionCatalog(
             desc = metadata,
             output = metadata.schema.toAttributes,
             child = parser.parsePlan(viewText))
-          SubqueryAlias(relationAlias, child, Some(name.copy(table = table, database = Some(db))), qualifier)
+          SubqueryAlias(relationAlias, child,
+            Some(name.copy(table = table, database = Some(db))), qualifier)
         } else {
           SubqueryAlias(relationAlias, SimpleCatalogRelation(metadata), None, qualifier)
         }

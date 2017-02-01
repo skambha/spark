@@ -255,7 +255,8 @@ case class UnresolvedStar(target: Option[Seq[String]]) extends Star with Unevalu
     val matched = if (nameParts.size == qualifierList.size) {
       (nameParts corresponds qualifierList) (resolver(_, _))
     } else {
-      if ( qualifierList.size > 1) {
+      // Check if it matches the table name part in the qualifier
+      if (qualifierList.size > 1) {
         resolver(nameParts(0), qualifierList.last)
       } else {
         false

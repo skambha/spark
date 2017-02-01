@@ -205,22 +205,13 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
     val qualifiers = if (attribute.qualifier.isDefined) attribute.qualifier.get else Seq.empty
     if ( qualifiers.isEmpty ) return None
 
-    // Get the qualifier match.
-    // Step1: Match full qualifier.
-    var i = 0
+    // #1: Match full qualifier.
     var result: Option[(Attribute, List[String])] = {
+      val qualifiersMatch = qualifiers.zip(nameParts)
+        .forall({ case(qualifierPart, namePart) => resolver(qualifierPart, namePart)})
 
-      val qualifiersMatch = qualifiers.zip(nameParts).forall({ case(qualifierPart, namePart) =>
-        resolver(qualifierPart, namePart)})
-
-      if (qualifiersMatch) {
-        val remainingPortion = if (nameParts.size > qualifiers.size) {
-          qualifiers.size
-        } else {
-          nameParts.size
-        }
-
-        val remainingParts = nameParts.slice(remainingPortion, nameParts.size)
+      if (qualifiersMatch && nameParts.size > qualifiers.size) {
+        val remainingParts = nameParts.slice(qualifiers.size, nameParts.size)
         resolveAsColumn(remainingParts, resolver, attribute)
       } else {
         None
@@ -228,7 +219,7 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
     }
 
     if (result.isEmpty) {
-      // test that the qualifier is same as the last qualifier.
+      // #2: test that the first portion in the nameParts matches the table from the qualifier
       result = {
         if (resolver(nameParts(0), qualifiers.last)) {
           resolveAsColumn(nameParts.slice(1, nameParts.length), resolver, attribute)

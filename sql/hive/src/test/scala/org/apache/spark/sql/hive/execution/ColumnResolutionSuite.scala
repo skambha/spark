@@ -99,8 +99,8 @@ class ColumnResolutionSuite extends QueryTest with SQLTestUtils with TestHiveSin
 
             sql(
               s"""
-                 |create table t1(i1 int) using csv options
-                 |(path "${path2}", header "false")
+                |create table t1(i1 int) using csv options
+                |(path "${path2}", header "false")
               """.stripMargin)
 
             columnResolutionTests(db1, db2)
@@ -149,6 +149,7 @@ class ColumnResolutionSuite extends QueryTest with SQLTestUtils with TestHiveSin
               }
 
               checkAnswer(spark.sql(s"select ${db1}.t1.i1 from t1, ${db2}.t1"), Row(1))
+              checkAnswer(spark.sql(s"select ${db1}.t1.i1 from ${db1}.t1, ${db2}.t1"), Row(1))
 
               spark.catalog.setCurrentDatabase(db2)
 
@@ -249,7 +250,6 @@ class ColumnResolutionSuite extends QueryTest with SQLTestUtils with TestHiveSin
           checkAnswer(spark.sql("select * from t3 where c1 in " +
             "(select c2 from t4 where t4.c3 = t3.c2)"), Row(4, 1))
 
-
           checkAnswer(spark.sql(s"select * from ${db1}.t3 where c1 in " +
             s"(select ${db1}.t4.c2 from ${db1}.t4 where ${db1}.t4.c3 = ${db1}.t3.c2)"), Row(4, 1))
 
@@ -278,4 +278,5 @@ class ColumnResolutionSuite extends QueryTest with SQLTestUtils with TestHiveSin
       })
     })
   }
+
 }
