@@ -1,0 +1,1840 @@
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/Analyzer.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/Analyzer.scala
+index 98851cb..12378bc 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/Analyzer.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/Analyzer.scala
+@@ -169,7 +169,7 @@ class Analyzer(
+         case u : UnresolvedRelation =>
+           val substituted = cteRelations.find(x => resolver(x._1, u.tableIdentifier.table))
+             .map(_._2).map { relation =>
+-              val withAlias = u.alias.map(SubqueryAlias(_, relation, None))
++              val withAlias = u.alias.map(SubqueryAlias(_, relation, None, None))
+               withAlias.getOrElse(relation)
+             }
+           substituted.getOrElse(u)
+@@ -586,7 +586,7 @@ class Analyzer(
+           execute(child)
+         }
+         view.copy(child = newChild)
+-      case p @ SubqueryAlias(_, view: View, _) =>
++      case p @ SubqueryAlias(_, view: View, _, _) =>
+         val newChild = resolveRelation(view)
+         p.copy(child = newChild)
+       case _ => plan
+@@ -2312,7 +2312,7 @@ class Analyzer(
+  */
+ object EliminateSubqueryAliases extends Rule[LogicalPlan] {
+   def apply(plan: LogicalPlan): LogicalPlan = plan transformUp {
+-    case SubqueryAlias(_, child, _) => child
++    case SubqueryAlias(_, child, _, _) => child
+   }
+ }
+ 
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/unresolved.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/unresolved.scala
+index 36ed9ba..64b2153 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/unresolved.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/unresolved.scala
+@@ -91,12 +91,12 @@ case class UnresolvedAttribute(nameParts: Seq[String]) extends Attribute with Un
+   override def exprId: ExprId = throw new UnresolvedException(this, "exprId")
+   override def dataType: DataType = throw new UnresolvedException(this, "dataType")
+   override def nullable: Boolean = throw new UnresolvedException(this, "nullable")
+-  override def qualifier: Option[String] = throw new UnresolvedException(this, "qualifier")
++  override def qualifier: Option[Seq[String]] = throw new UnresolvedException(this, "qualifier")
+   override lazy val resolved = false
+ 
+   override def newInstance(): UnresolvedAttribute = this
+   override def withNullability(newNullability: Boolean): UnresolvedAttribute = this
+-  override def withQualifier(newQualifier: Option[String]): UnresolvedAttribute = this
++  override def withQualifier(newQualifier: Option[Seq[String]]): UnresolvedAttribute = this
+   override def withName(newName: String): UnresolvedAttribute = UnresolvedAttribute.quoted(newName)
+   override def withMetadata(newMetadata: Metadata): Attribute = this
+ 
+@@ -224,7 +224,7 @@ abstract class Star extends LeafExpression with NamedExpression {
+   override def exprId: ExprId = throw new UnresolvedException(this, "exprId")
+   override def dataType: DataType = throw new UnresolvedException(this, "dataType")
+   override def nullable: Boolean = throw new UnresolvedException(this, "nullable")
+-  override def qualifier: Option[String] = throw new UnresolvedException(this, "qualifier")
++  override def qualifier: Option[Seq[String]] = throw new UnresolvedException(this, "qualifier")
+   override def toAttribute: Attribute = throw new UnresolvedException(this, "toAttribute")
+   override def newInstance(): NamedExpression = throw new UnresolvedException(this, "newInstance")
+   override lazy val resolved = false
+@@ -246,17 +246,36 @@ abstract class Star extends LeafExpression with NamedExpression {
+  */
+ case class UnresolvedStar(target: Option[Seq[String]]) extends Star with Unevaluable {
+ 
+-  override def expand(input: LogicalPlan, resolver: Resolver): Seq[NamedExpression] = {
+-    // If there is no table specified, use all input attributes.
+-    if (target.isEmpty) return input.output
++  def matchedQualifier(
++      attribute: Attribute,
++      nameParts: Seq[String],
++      resolver: Resolver): Boolean = {
++    val qualifierList = if (attribute.qualifier.isDefined) attribute.qualifier.get else Seq.empty
+ 
+-    val expandedAttributes =
+-      if (target.get.size == 1) {
+-        // If there is a table, pick out attributes that are part of this table.
+-        input.output.filter(_.qualifier.exists(resolver(_, target.get.head)))
++    val matched = if (nameParts.size == qualifierList.size) {
++      (nameParts corresponds qualifierList) (resolver(_, _))
++    } else {
++      // Check if it matches the table in the qualifier
++      // To handle scenario select t1.* from db1.t1
++      if (nameParts.size == 1) {
++        resolver(nameParts(0), qualifierList.last)
+       } else {
+-        List()
++        false
+       }
++    }
++
++    matched
++  }
++
++  override def expand(
++      input: LogicalPlan,
++      resolver: Resolver): Seq[NamedExpression] = {
++    // If there is no table specified, use all input attributes.
++    if (target.isEmpty) return input.output
++
++    val expandedAttributes = input.output.filter (x =>
++      matchedQualifier(x, target.get, resolver))
++
+     if (expandedAttributes.nonEmpty) return expandedAttributes
+ 
+     // Try to resolve it as a struct expansion. If there is a conflict and both are possible,
+@@ -306,7 +325,7 @@ case class MultiAlias(child: Expression, names: Seq[String])
+ 
+   override def nullable: Boolean = throw new UnresolvedException(this, "nullable")
+ 
+-  override def qualifier: Option[String] = throw new UnresolvedException(this, "qualifier")
++  override def qualifier: Option[Seq[String]] = throw new UnresolvedException(this, "qualifier")
+ 
+   override def toAttribute: Attribute = throw new UnresolvedException(this, "toAttribute")
+ 
+@@ -364,7 +383,7 @@ case class UnresolvedAlias(
+   extends UnaryExpression with NamedExpression with Unevaluable {
+ 
+   override def toAttribute: Attribute = throw new UnresolvedException(this, "toAttribute")
+-  override def qualifier: Option[String] = throw new UnresolvedException(this, "qualifier")
++  override def qualifier: Option[Seq[String]] = throw new UnresolvedException(this, "qualifier")
+   override def exprId: ExprId = throw new UnresolvedException(this, "exprId")
+   override def nullable: Boolean = throw new UnresolvedException(this, "nullable")
+   override def dataType: DataType = throw new UnresolvedException(this, "dataType")
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/catalog/SessionCatalog.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/catalog/SessionCatalog.scala
+index e9543f7..61e6b74 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/catalog/SessionCatalog.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/catalog/SessionCatalog.scala
+@@ -579,9 +579,10 @@ class SessionCatalog(
+       val db = formatDatabaseName(name.database.getOrElse(currentDb))
+       val table = formatTableName(name.table)
+       val relationAlias = alias.getOrElse(table)
++      val qualifier = if (alias.isDefined) None else Option(Seq(db, table))
+       if (db == globalTempViewManager.database) {
+         globalTempViewManager.get(table).map { viewDef =>
+-          SubqueryAlias(relationAlias, viewDef, None)
++          SubqueryAlias(relationAlias, viewDef, None, qualifier)
+         }.getOrElse(throw new NoSuchTableException(db, table))
+       } else if (name.database.isDefined || !tempTables.contains(table)) {
+         val metadata = externalCatalog.getTable(db, table)
+@@ -594,12 +595,13 @@ class SessionCatalog(
+             desc = metadata,
+             output = metadata.schema.toAttributes,
+             child = parser.parsePlan(viewText))
+-          SubqueryAlias(relationAlias, child, Some(name.copy(table = table, database = Some(db))))
++          SubqueryAlias(relationAlias, child,
++            Some(name.copy(table = table, database = Some(db))), qualifier)
+         } else {
+-          SubqueryAlias(relationAlias, SimpleCatalogRelation(metadata), None)
++          SubqueryAlias(relationAlias, SimpleCatalogRelation(metadata), None, qualifier)
+         }
+       } else {
+-        SubqueryAlias(relationAlias, tempTables(table), None)
++        SubqueryAlias(relationAlias, tempTables(table), None, None)
+       }
+     }
+   }
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/catalog/interface.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/catalog/interface.scala
+index 80d3282..4d795fb 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/catalog/interface.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/catalog/interface.scala
+@@ -361,7 +361,7 @@ case class SimpleCatalogRelation(
+   override val output: Seq[Attribute] = {
+     val (partCols, dataCols) = metadata.schema.toAttributes
+       // Since data can be dumped in randomly with no validation, everything is nullable.
+-      .map(_.withNullability(true).withQualifier(Some(metadata.identifier.table)))
++      .map(_.withNullability(true).withQualifier(Some(Seq(metadata.identifier.table))))
+       .partition { a =>
+         metadata.partitionColumnNames.contains(a.name)
+       }
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/dsl/package.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/dsl/package.scala
+index 66e52ca..eed09ee 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/dsl/package.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/dsl/package.scala
+@@ -347,7 +347,7 @@ package object dsl {
+           orderSpec: Seq[SortOrder]): LogicalPlan =
+         Window(windowExpressions, partitionSpec, orderSpec, logicalPlan)
+ 
+-      def subquery(alias: Symbol): LogicalPlan = SubqueryAlias(alias.name, logicalPlan, None)
++      def subquery(alias: Symbol): LogicalPlan = SubqueryAlias(alias.name, logicalPlan, None, None)
+ 
+       def except(otherPlan: LogicalPlan): LogicalPlan = Except(logicalPlan, otherPlan)
+ 
+@@ -371,7 +371,7 @@ package object dsl {
+ 
+       def as(alias: String): LogicalPlan = logicalPlan match {
+         case UnresolvedRelation(tbl, _) => UnresolvedRelation(tbl, Option(alias))
+-        case plan => SubqueryAlias(alias, plan, None)
++        case plan => SubqueryAlias(alias, plan, None, None)
+       }
+ 
+       def repartition(num: Integer): LogicalPlan =
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/namedExpressions.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/namedExpressions.scala
+index c842f85..e4cca0c 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/namedExpressions.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/expressions/namedExpressions.scala
+@@ -66,6 +66,8 @@ trait NamedExpression extends Expression {
+ 
+   /**
+    * Optional qualifier for the expression.
++   * Qualifier can also contain the fully qualified information, for e.g, Sequence of string
++   * containing the database and the table name
+    *
+    * For now, since we do not allow using original table name to qualify a column name once the
+    * table is aliased, this can only be:
+@@ -74,7 +76,7 @@ trait NamedExpression extends Expression {
+    *    e.g. top level attributes aliased in the SELECT clause, or column from a LocalRelation.
+    * 2. Single element: either the table name or the alias name of the table.
+    */
+-  def qualifier: Option[String]
++  def qualifier: Option[Seq[String]]
+ 
+   def toAttribute: Attribute
+ 
+@@ -103,7 +105,7 @@ abstract class Attribute extends LeafExpression with NamedExpression with NullIn
+   override def references: AttributeSet = AttributeSet(this)
+ 
+   def withNullability(newNullability: Boolean): Attribute
+-  def withQualifier(newQualifier: Option[String]): Attribute
++  def withQualifier(newQualifier: Option[Seq[String]]): Attribute
+   def withName(newName: String): Attribute
+   def withMetadata(newMetadata: Metadata): Attribute
+ 
+@@ -132,7 +134,7 @@ abstract class Attribute extends LeafExpression with NamedExpression with NullIn
+  */
+ case class Alias(child: Expression, name: String)(
+     val exprId: ExprId = NamedExpression.newExprId,
+-    val qualifier: Option[String] = None,
++    val qualifier: Option[Seq[String]] = None,
+     val explicitMetadata: Option[Metadata] = None,
+     override val isGenerated: java.lang.Boolean = false)
+   extends UnaryExpression with NamedExpression {
+@@ -190,7 +192,7 @@ case class Alias(child: Expression, name: String)(
+   }
+ 
+   override def sql: String = {
+-    val qualifierPrefix = qualifier.map(_ + ".").getOrElse("")
++    val qualifierPrefix = if (qualifier.isDefined) s"${qualifier.get.mkString(".")}." else ""
+     s"${child.sql} AS $qualifierPrefix${quoteIdentifier(name)}"
+   }
+ }
+@@ -215,7 +217,7 @@ case class AttributeReference(
+     nullable: Boolean = true,
+     override val metadata: Metadata = Metadata.empty)(
+     val exprId: ExprId = NamedExpression.newExprId,
+-    val qualifier: Option[String] = None,
++    val qualifier: Option[Seq[String]] = None,
+     override val isGenerated: java.lang.Boolean = false)
+   extends Attribute with Unevaluable {
+ 
+@@ -278,7 +280,7 @@ case class AttributeReference(
+   /**
+    * Returns a copy of this [[AttributeReference]] with new qualifier.
+    */
+-  override def withQualifier(newQualifier: Option[String]): AttributeReference = {
++  override def withQualifier(newQualifier: Option[Seq[String]]): AttributeReference = {
+     if (newQualifier == qualifier) {
+       this
+     } else {
+@@ -316,7 +318,7 @@ case class AttributeReference(
+   override def simpleString: String = s"$name#${exprId.id}: ${dataType.simpleString}"
+ 
+   override def sql: String = {
+-    val qualifierPrefix = qualifier.map(_ + ".").getOrElse("")
++    val qualifierPrefix = if (qualifier.isDefined) s"${qualifier.get.mkString(".")}." else ""
+     s"$qualifierPrefix${quoteIdentifier(name)}"
+   }
+ }
+@@ -342,12 +344,12 @@ case class PrettyAttribute(
+   override def withNullability(newNullability: Boolean): Attribute =
+     throw new UnsupportedOperationException
+   override def newInstance(): Attribute = throw new UnsupportedOperationException
+-  override def withQualifier(newQualifier: Option[String]): Attribute =
++  override def withQualifier(newQualifier: Option[Seq[String]]): Attribute =
+     throw new UnsupportedOperationException
+   override def withName(newName: String): Attribute = throw new UnsupportedOperationException
+   override def withMetadata(newMetadata: Metadata): Attribute =
+     throw new UnsupportedOperationException
+-  override def qualifier: Option[String] = throw new UnsupportedOperationException
++  override def qualifier: Option[Seq[String]] = throw new UnsupportedOperationException
+   override def exprId: ExprId = throw new UnsupportedOperationException
+   override def nullable: Boolean = true
+ }
+@@ -363,7 +365,7 @@ case class OuterReference(e: NamedExpression)
+   override def prettyName: String = "outer"
+ 
+   override def name: String = e.name
+-  override def qualifier: Option[String] = e.qualifier
++  override def qualifier: Option[Seq[String]] = e.qualifier
+   override def exprId: ExprId = e.exprId
+   override def toAttribute: Attribute = e.toAttribute
+   override def newInstance(): NamedExpression = OuterReference(e.newInstance())
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/identifiers.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/identifiers.scala
+index 26697e9..23e1aea 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/identifiers.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/identifiers.scala
+@@ -60,6 +60,11 @@ case class TableIdentifier(table: String, database: Option[String])
+   override val identifier: String = table
+ 
+   def this(table: String) = this(table, None)
++
++  def toSeq(): Seq[String] = {
++    if (database.isDefined) Seq(database.get, table) else Seq(table)
++  }
++
+ }
+ 
+ /** A fully qualified identifier for a table (i.e., database.tableName) */
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/optimizer/subquery.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/optimizer/subquery.scala
+index f14aaab..78da2fc 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/optimizer/subquery.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/optimizer/subquery.scala
+@@ -163,7 +163,7 @@ object RewriteCorrelatedScalarSubquery extends Rule[LogicalPlan] {
+     // and Project operators, followed by an optional Filter, followed by an
+     // Aggregate. Traverse the operators recursively.
+     def evalPlan(lp : LogicalPlan) : Map[ExprId, Option[Any]] = lp match {
+-      case SubqueryAlias(_, child, _) => evalPlan(child)
++      case SubqueryAlias(_, child, _, _) => evalPlan(child)
+       case Filter(condition, child) =>
+         val bindings = evalPlan(child)
+         if (bindings.isEmpty) bindings
+@@ -221,7 +221,7 @@ object RewriteCorrelatedScalarSubquery extends Rule[LogicalPlan] {
+           topPart += p
+           bottomPart = child
+ 
+-        case s @ SubqueryAlias(_, child, _) =>
++        case s @ SubqueryAlias(_, child, _, _) =>
+           topPart += s
+           bottomPart = child
+ 
+@@ -292,8 +292,8 @@ object RewriteCorrelatedScalarSubquery extends Rule[LogicalPlan] {
+             topPart.reverse.foreach {
+               case Project(projList, _) =>
+                 subqueryRoot = Project(projList ++ havingInputs, subqueryRoot)
+-              case s @ SubqueryAlias(alias, _, None) =>
+-                subqueryRoot = SubqueryAlias(alias, subqueryRoot, None)
++              case s @ SubqueryAlias(alias, _, None, None) =>
++                subqueryRoot = SubqueryAlias(alias, subqueryRoot, None, None)
+               case op => sys.error(s"Unexpected operator $op in corelated subquery")
+             }
+ 
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/parser/AstBuilder.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/parser/AstBuilder.scala
+index 3969fdb..8847854 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/parser/AstBuilder.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/parser/AstBuilder.scala
+@@ -108,7 +108,7 @@ class AstBuilder extends SqlBaseBaseVisitor[AnyRef] with Logging {
+    * This is only used for Common Table Expressions.
+    */
+   override def visitNamedQuery(ctx: NamedQueryContext): SubqueryAlias = withOrigin(ctx) {
+-    SubqueryAlias(ctx.name.getText, plan(ctx.query), None)
++    SubqueryAlias(ctx.name.getText, plan(ctx.query), None, None)
+   }
+ 
+   /**
+@@ -704,7 +704,7 @@ class AstBuilder extends SqlBaseBaseVisitor[AnyRef] with Logging {
+    * Create an alias (SubqueryAlias) for a LogicalPlan.
+    */
+   private def aliasPlan(alias: ParserRuleContext, plan: LogicalPlan): LogicalPlan = {
+-    SubqueryAlias(alias.getText, plan, None)
++    SubqueryAlias(alias.getText, plan, None, None)
+   }
+ 
+   /**
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/plans/logical/LogicalPlan.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/plans/logical/LogicalPlan.scala
+index 0587a59..42e1cc6 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/plans/logical/LogicalPlan.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/plans/logical/LogicalPlan.scala
+@@ -192,8 +192,8 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
+   /**
+    * Resolve the given `name` string against the given attribute, returning either 0 or 1 match.
+    *
+-   * This assumes `name` has multiple parts, where the 1st part is a qualifier
+-   * (i.e. table name, alias, or subquery alias).
++   * This assumes `name` has multiple parts, where parts of the name is a qualifier
++   * (i.e. db.table, table name, alias, or subquery alias).
+    * See the comment above `candidates` variable in resolve() for semantics the returned data.
+    */
+   private def resolveAsTableColumn(
+@@ -201,13 +201,36 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
+       resolver: Resolver,
+       attribute: Attribute): Option[(Attribute, List[String])] = {
+     assert(nameParts.length > 1)
+-    if (attribute.qualifier.exists(resolver(_, nameParts.head))) {
+-      // At least one qualifier matches. See if remaining parts match.
+-      val remainingParts = nameParts.tail
+-      resolveAsColumn(remainingParts, resolver, attribute)
+-    } else {
+-      None
++
++    val qualifiers = if (attribute.qualifier.isDefined) attribute.qualifier.get else Seq.empty
++    if ( qualifiers.isEmpty ) return None
++
++    // #1: Match full qualifier.
++    var result: Option[(Attribute, List[String])] = {
++      val qualifiersMatch = qualifiers.zip(nameParts)
++        .forall({ case(qualifierPart, namePart) => resolver(qualifierPart, namePart)})
++
++      if (qualifiersMatch && nameParts.size > qualifiers.size) {
++        val remainingParts = nameParts.slice(qualifiers.size, nameParts.size)
++        resolveAsColumn(remainingParts, resolver, attribute)
++      } else {
++        None
++      }
+     }
++
++    if (result.isEmpty) {
++      // #2: test that the first portion in the nameParts matches the table from the qualifier
++      result = {
++        if (resolver(nameParts(0), qualifiers.last)) {
++          resolveAsColumn(nameParts.slice(1, nameParts.length), resolver, attribute)
++        }
++        else {
++          None
++        }
++      }
++    }
++
++    result
+   }
+ 
+   /**
+diff --git a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/plans/logical/basicLogicalOperators.scala b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/plans/logical/basicLogicalOperators.scala
+index 3bd3143..72c2d79 100644
+--- a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/plans/logical/basicLogicalOperators.scala
++++ b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/plans/logical/basicLogicalOperators.scala
+@@ -104,7 +104,7 @@ case class Generate(
+   def qualifiedGeneratorOutput: Seq[Attribute] = {
+     val qualifiedOutput = qualifier.map { q =>
+       // prepend the new qualifier to the existed one
+-      generatorOutput.map(a => a.withQualifier(Some(q)))
++      generatorOutput.map(a => a.withQualifier(Some(Seq(q))))
+     }.getOrElse(generatorOutput)
+     val nullableOutput = qualifiedOutput.map {
+       // if outer, make all attributes nullable, otherwise keep existing nullability
+@@ -759,10 +759,14 @@ case class LocalLimit(limitExpr: Expression, child: LogicalPlan) extends UnaryNo
+ case class SubqueryAlias(
+     alias: String,
+     child: LogicalPlan,
+-    view: Option[TableIdentifier])
++    view: Option[TableIdentifier],
++    qualifier: Option[Seq[String]])
+   extends UnaryNode {
+ 
+-  override def output: Seq[Attribute] = child.output.map(_.withQualifier(Some(alias)))
++  override def output: Seq[Attribute] = {
++    val qualifierList = if (qualifier.isDefined) qualifier.get else Seq(alias)
++    child.output.map(_.withQualifier(Option(qualifierList)))
++  }
+ }
+ 
+ /**
+diff --git a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/analysis/AnalysisSuite.scala b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/analysis/AnalysisSuite.scala
+index 817de48..a786af8 100644
+--- a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/analysis/AnalysisSuite.scala
++++ b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/analysis/AnalysisSuite.scala
+@@ -369,8 +369,8 @@ class AnalysisSuite extends AnalysisTest with ShouldMatchers {
+     val query =
+       Project(Seq($"x.key", $"y.key"),
+         Join(
+-          Project(Seq($"x.key"), SubqueryAlias("x", input, None)),
+-          Project(Seq($"y.key"), SubqueryAlias("y", input, None)),
++          Project(Seq($"x.key"), SubqueryAlias("x", input, None, None)),
++          Project(Seq($"y.key"), SubqueryAlias("y", input, None, None)),
+           Cross, None))
+ 
+     assertAnalysisSuccess(query)
+diff --git a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/catalog/SessionCatalogSuite.scala b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/catalog/SessionCatalogSuite.scala
+index f935de6..15ed9d0 100644
+--- a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/catalog/SessionCatalogSuite.scala
++++ b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/catalog/SessionCatalogSuite.scala
+@@ -433,24 +433,27 @@ class SessionCatalogSuite extends PlanTest {
+     sessionCatalog.setCurrentDatabase("db2")
+     // If we explicitly specify the database, we'll look up the relation in that database
+     assert(sessionCatalog.lookupRelation(TableIdentifier("tbl1", Some("db2")))
+-      == SubqueryAlias("tbl1", SimpleCatalogRelation(metastoreTable1), None))
++      == SubqueryAlias(
++        "tbl1", SimpleCatalogRelation(metastoreTable1), None, Option(Seq("db2", "tbl1"))))
+     // Otherwise, we'll first look up a temporary table with the same name
+     assert(sessionCatalog.lookupRelation(TableIdentifier("tbl1"))
+-      == SubqueryAlias("tbl1", tempTable1, None))
++      == SubqueryAlias("tbl1", tempTable1, None, None))
+     // Then, if that does not exist, look up the relation in the current database
+     sessionCatalog.dropTable(TableIdentifier("tbl1"), ignoreIfNotExists = false, purge = false)
+     assert(sessionCatalog.lookupRelation(TableIdentifier("tbl1"))
+-      == SubqueryAlias("tbl1", SimpleCatalogRelation(metastoreTable1), None))
++      == SubqueryAlias(
++        "tbl1", SimpleCatalogRelation(metastoreTable1), None, Option(Seq("db2", "tbl1"))))
+   }
+ 
+   test("lookup table relation with alias") {
+     val catalog = new SessionCatalog(newBasicCatalog())
+     val alias = "monster"
+     val tableMetadata = catalog.getTableMetadata(TableIdentifier("tbl1", Some("db2")))
+-    val relation = SubqueryAlias("tbl1", SimpleCatalogRelation(tableMetadata), None)
++    val relation = SubqueryAlias(
++      "tbl1", SimpleCatalogRelation(tableMetadata), None, Option(Seq("db2", "tbl1")))
+     val relationWithAlias =
+       SubqueryAlias(alias,
+-        SimpleCatalogRelation(tableMetadata), None)
++        SimpleCatalogRelation(tableMetadata), None, None)
+     assert(catalog.lookupRelation(
+       TableIdentifier("tbl1", Some("db2")), alias = None) == relation)
+     assert(catalog.lookupRelation(
+@@ -462,7 +465,7 @@ class SessionCatalogSuite extends PlanTest {
+     val tmpView = Range(1, 10, 2, 10)
+     catalog.createTempView("vw1", tmpView, overrideIfExists = false)
+     val plan = catalog.lookupRelation(TableIdentifier("vw1"), Option("range"))
+-    assert(plan == SubqueryAlias("range", tmpView, None))
++    assert(plan == SubqueryAlias("range", tmpView, None, None))
+   }
+ 
+   test("look up view relation") {
+@@ -475,11 +478,13 @@ class SessionCatalogSuite extends PlanTest {
+     val view = View(desc = metadata, output = metadata.schema.toAttributes,
+       child = CatalystSqlParser.parsePlan(metadata.viewText.get))
+     comparePlans(sessionCatalog.lookupRelation(TableIdentifier("view1", Some("db3"))),
+-      SubqueryAlias("view1", view, Some(TableIdentifier("view1", Some("db3")))))
++      SubqueryAlias("view1", view, Some(TableIdentifier("view1", Some("db3"))),
++        Some(Seq("db3", "view1"))))
+     // Look up a view using current database of the session catalog.
+     sessionCatalog.setCurrentDatabase("db3")
+     comparePlans(sessionCatalog.lookupRelation(TableIdentifier("view1")),
+-      SubqueryAlias("view1", view, Some(TableIdentifier("view1", Some("db3")))))
++      SubqueryAlias("view1", view, Some(TableIdentifier("view1", Some("db3"))),
++        Some(Seq("db3", "view1"))))
+   }
+ 
+   test("table exists") {
+diff --git a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/SubexpressionEliminationSuite.scala b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/SubexpressionEliminationSuite.scala
+index 2db2a04..624cc43 100644
+--- a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/SubexpressionEliminationSuite.scala
++++ b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/expressions/SubexpressionEliminationSuite.scala
+@@ -30,7 +30,7 @@ class SubexpressionEliminationSuite extends SparkFunSuite {
+     }
+     val b1 = a.withName("name2").withExprId(id)
+     val b2 = a.withExprId(id)
+-    val b3 = a.withQualifier(Some("qualifierName"))
++    val b3 = a.withQualifier(Some(Seq("qualifierName")))
+ 
+     assert(b1 != b2)
+     assert(a != b1)
+diff --git a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/optimizer/ColumnPruningSuite.scala b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/optimizer/ColumnPruningSuite.scala
+index 5bd1bc8..27d70d5 100644
+--- a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/optimizer/ColumnPruningSuite.scala
++++ b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/optimizer/ColumnPruningSuite.scala
+@@ -320,16 +320,16 @@ class ColumnPruningSuite extends PlanTest {
+     val query =
+       Project(Seq($"x.key", $"y.key"),
+         Join(
+-          SubqueryAlias("x", input, None),
+-          BroadcastHint(SubqueryAlias("y", input, None)), Inner, None)).analyze
++          SubqueryAlias("x", input, None, None),
++          BroadcastHint(SubqueryAlias("y", input, None, None)), Inner, None)).analyze
+ 
+     val optimized = Optimize.execute(query)
+ 
+     val expected =
+       Join(
+-        Project(Seq($"x.key"), SubqueryAlias("x", input, None)),
++        Project(Seq($"x.key"), SubqueryAlias("x", input, None, None)),
+         BroadcastHint(
+-          Project(Seq($"y.key"), SubqueryAlias("y", input, None))),
++          Project(Seq($"y.key"), SubqueryAlias("y", input, None, None))),
+         Inner, None).analyze
+ 
+     comparePlans(optimized, expected)
+diff --git a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/optimizer/EliminateSubqueryAliasesSuite.scala b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/optimizer/EliminateSubqueryAliasesSuite.scala
+index a8aeedb..02c6996 100644
+--- a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/optimizer/EliminateSubqueryAliasesSuite.scala
++++ b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/optimizer/EliminateSubqueryAliasesSuite.scala
+@@ -46,13 +46,13 @@ class EliminateSubqueryAliasesSuite extends PlanTest with PredicateHelper {
+ 
+   test("eliminate top level subquery") {
+     val input = LocalRelation('a.int, 'b.int)
+-    val query = SubqueryAlias("a", input, None)
++    val query = SubqueryAlias("a", input, None, None)
+     comparePlans(afterOptimization(query), input)
+   }
+ 
+   test("eliminate mid-tree subquery") {
+     val input = LocalRelation('a.int, 'b.int)
+-    val query = Filter(TrueLiteral, SubqueryAlias("a", input, None))
++    val query = Filter(TrueLiteral, SubqueryAlias("a", input, None, None))
+     comparePlans(
+       afterOptimization(query),
+       Filter(TrueLiteral, LocalRelation('a.int, 'b.int)))
+@@ -61,7 +61,8 @@ class EliminateSubqueryAliasesSuite extends PlanTest with PredicateHelper {
+   test("eliminate multiple subqueries") {
+     val input = LocalRelation('a.int, 'b.int)
+     val query = Filter(TrueLiteral,
+-      SubqueryAlias("c", SubqueryAlias("b", SubqueryAlias("a", input, None), None), None))
++      SubqueryAlias("c",
++        SubqueryAlias("b", SubqueryAlias("a", input, None, None), None, None), None, None))
+     comparePlans(
+       afterOptimization(query),
+       Filter(TrueLiteral, LocalRelation('a.int, 'b.int)))
+diff --git a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/optimizer/JoinOptimizationSuite.scala b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/optimizer/JoinOptimizationSuite.scala
+index 65dd622..522a13c 100644
+--- a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/optimizer/JoinOptimizationSuite.scala
++++ b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/optimizer/JoinOptimizationSuite.scala
+@@ -129,15 +129,15 @@ class JoinOptimizationSuite extends PlanTest {
+     val query =
+       Project(Seq($"x.key", $"y.key"),
+         Join(
+-          SubqueryAlias("x", input, None),
+-          BroadcastHint(SubqueryAlias("y", input, None)), Cross, None)).analyze
++          SubqueryAlias("x", input, None, None),
++          BroadcastHint(SubqueryAlias("y", input, None, None)), Cross, None)).analyze
+ 
+     val optimized = Optimize.execute(query)
+ 
+     val expected =
+       Join(
+-        Project(Seq($"x.key"), SubqueryAlias("x", input, None)),
+-        BroadcastHint(Project(Seq($"y.key"), SubqueryAlias("y", input, None))),
++        Project(Seq($"x.key"), SubqueryAlias("x", input, None, None)),
++        BroadcastHint(Project(Seq($"y.key"), SubqueryAlias("y", input, None, None))),
+         Cross, None).analyze
+ 
+     comparePlans(optimized, expected)
+diff --git a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/parser/PlanParserSuite.scala b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/parser/PlanParserSuite.scala
+index f408ba9..313206f 100644
+--- a/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/parser/PlanParserSuite.scala
++++ b/sql/catalyst/src/test/scala/org/apache/spark/sql/catalyst/parser/PlanParserSuite.scala
+@@ -79,7 +79,7 @@ class PlanParserSuite extends PlanTest {
+     def cte(plan: LogicalPlan, namedPlans: (String, LogicalPlan)*): With = {
+       val ctes = namedPlans.map {
+         case (name, cte) =>
+-          name -> SubqueryAlias(name, cte, None)
++          name -> SubqueryAlias(name, cte, None, None)
+       }
+       With(plan, ctes)
+     }
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/Dataset.scala b/sql/core/src/main/scala/org/apache/spark/sql/Dataset.scala
+index 24b9b81..43467f4 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/Dataset.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/Dataset.scala
+@@ -1090,7 +1090,7 @@ class Dataset[T] private[sql](
+    * @since 1.6.0
+    */
+   def as(alias: String): Dataset[T] = withTypedPlan {
+-    SubqueryAlias(alias, logicalPlan, None)
++    SubqueryAlias(alias, logicalPlan, None, None)
+   }
+ 
+   /**
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/catalyst/SQLBuilder.scala b/sql/core/src/main/scala/org/apache/spark/sql/catalyst/SQLBuilder.scala
+index 0384c0f..77465b1 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/catalyst/SQLBuilder.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/catalyst/SQLBuilder.scala
+@@ -60,22 +60,14 @@ class SQLBuilder private (
+   def toSQL: String = {
+     val canonicalizedPlan = Canonicalizer.execute(logicalPlan)
+     val outputNames = logicalPlan.output.map(_.name)
+-    val qualifiers = logicalPlan.output.flatMap(_.qualifier).distinct
+-
+-    // Keep the qualifier information by using it as sub-query name, if there is only one qualifier
+-    // present.
+-    val finalName = if (qualifiers.length == 1) {
+-      qualifiers.head
+-    } else {
+-      newSubqueryName()
+-    }
++    val finalName = newSubqueryName()
+ 
+     // Canonicalizer will remove all naming information, we should add it back by adding an extra
+     // Project and alias the outputs.
+     val aliasedOutput = canonicalizedPlan.output.zip(outputNames).map {
+       case (attr, name) => Alias(attr.withQualifier(None), name)()
+     }
+-    val finalPlan = Project(aliasedOutput, SubqueryAlias(finalName, canonicalizedPlan, None))
++    val finalPlan = Project(aliasedOutput, SubqueryAlias(finalName, canonicalizedPlan, None, None))
+ 
+     try {
+       val replaced = finalPlan.transformAllExpressions {
+@@ -454,7 +446,7 @@ class SQLBuilder private (
+ 
+     object RemoveSubqueriesAboveSQLTable extends Rule[LogicalPlan] {
+       override def apply(plan: LogicalPlan): LogicalPlan = plan transformUp {
+-        case SubqueryAlias(_, t @ ExtractSQLTable(_), _) => t
++        case SubqueryAlias(_, t @ ExtractSQLTable(_), _, _) => t
+       }
+     }
+ 
+@@ -571,7 +563,7 @@ class SQLBuilder private (
+     }
+ 
+     private def addSubquery(plan: LogicalPlan): SubqueryAlias = {
+-      SubqueryAlias(newSubqueryName(), plan, None)
++      SubqueryAlias(newSubqueryName(), plan, None, None)
+     }
+ 
+     private def addSubqueryIfNeeded(plan: LogicalPlan): LogicalPlan = plan match {
+diff --git a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/rules.scala b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/rules.scala
+index 5ca8226..98fe647 100644
+--- a/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/rules.scala
++++ b/sql/core/src/main/scala/org/apache/spark/sql/execution/datasources/rules.scala
+@@ -56,7 +56,7 @@ class ResolveDataSource(sparkSession: SparkSession) extends Rule[LogicalPlan] {
+             s"${u.tableIdentifier.database.get}")
+         }
+         val plan = LogicalRelation(dataSource.resolveRelation())
+-        u.alias.map(a => SubqueryAlias(a, plan, None)).getOrElse(plan)
++        u.alias.map(a => SubqueryAlias(a, plan, None, None)).getOrElse(plan)
+       } catch {
+         case _: ClassNotFoundException => u
+         case e: Exception =>
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/ColumnResolutionSuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/ColumnResolutionSuite.scala
+new file mode 100644
+index 0000000..ef777c5
+--- /dev/null
++++ b/sql/core/src/test/scala/org/apache/spark/sql/ColumnResolutionSuite.scala
+@@ -0,0 +1,91 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.spark.sql
++
++import java.io.File
++
++import org.apache.spark.sql.test.SharedSQLContext
++
++
++class ColumnResolutionSuite extends QueryTest with SharedSQLContext {
++
++  import testImplicits._
++
++  def columnResolutionTests(db1: String, db2: String): Unit = {
++    spark.catalog.setCurrentDatabase(db1)
++    checkAnswer(spark.sql("select i1 from t1"), Row(1))
++    checkAnswer(spark.sql(s"select i1 from ${db1}.t1"), Row(1))
++
++    checkAnswer(spark.sql("select t1.i1 from t1"), Row(1))
++    checkAnswer(spark.sql(s"select t1.i1 from ${db1}.t1"), Row(1))
++
++    checkAnswer(spark.sql(s"select ${db1}.t1.i1 from t1"), Row(1))
++    checkAnswer(spark.sql(s"select ${db1}.t1.i1 from ${db1}.t1"), Row(1))
++
++    // Change current database to db2
++    spark.catalog.setCurrentDatabase(db2)
++    checkAnswer(spark.sql("select i1 from t1"), Row(20))
++    checkAnswer(spark.sql(s"select i1 from ${db1}.t1"), Row(1))
++
++    checkAnswer(spark.sql("select t1.i1 from t1"), Row(20))
++    checkAnswer(spark.sql(s"select t1.i1 from ${db1}.t1"), Row(1))
++
++    intercept[AnalysisException] {
++      spark.sql(s"select ${db1}.t1.i1 from t1")
++    }
++
++    checkAnswer(spark.sql(s"select ${db1}.t1.i1 from ${db1}.t1"), Row(1))
++  }
++
++  test("column resolution scenarios with datasource table") {
++    val currentDb = spark.catalog.currentDatabase
++    withTempDatabase { db1 =>
++      withTempDatabase { db2 =>
++        withTempDir(f => {
++          try {
++            val df = Seq(1).toDF()
++            val path = s"${f.getCanonicalPath}${File.separator}test1"
++            df.write.csv(path)
++            spark.catalog.setCurrentDatabase(db1)
++
++            sql(
++              s"""
++                |create table t1(i1 int) using csv options
++                |(path "${path}", header "false")
++              """.stripMargin)
++
++            spark.catalog.setCurrentDatabase(db2)
++            val df2 = Seq(20).toDF()
++            val path2 = s"${f.getCanonicalPath}${File.separator}test2"
++            df2.write.csv(path2)
++
++            sql(
++              s"""
++                |create table t1(i1 int) using csv options
++                |(path "${path2}", header "false")
++              """.stripMargin)
++
++            columnResolutionTests(db1, db2)
++          } finally {
++            spark.catalog.setCurrentDatabase (currentDb)
++          }
++        })
++      }
++    }
++  }
++}
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/execution/GlobalTempViewSuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/execution/GlobalTempViewSuite.scala
+index 5c63c6a..5a9ca0f 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/execution/GlobalTempViewSuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/execution/GlobalTempViewSuite.scala
+@@ -150,6 +150,20 @@ class GlobalTempViewSuite extends QueryTest with SharedSQLContext {
+     }
+   }
+ 
++  test("column resolution scenarios with global temp view") {
++    val df = Seq(1).toDF("i1")
++    df.createGlobalTempView("t1")
++    try {
++      checkAnswer(spark.sql(s"select * from ${globalTempDB}.t1"), Row(1))
++      checkAnswer(spark.sql(s"select ${globalTempDB}.t1.* from ${globalTempDB}.t1"), Row(1))
++      checkAnswer(spark.sql(s"select i1 from ${globalTempDB}.t1"), Row(1))
++      checkAnswer(spark.sql(s"select ${globalTempDB}.t1.i1 from ${globalTempDB}.t1"), Row(1))
++      checkAnswer(spark.sql(s"select t1.i1 from ${globalTempDB}.t1"), Row(1))
++    } finally {
++      spark.catalog.dropGlobalTempView("t1")
++    }
++  }
++
+   test("public Catalog should recognize global temp view") {
+     try {
+       sql("CREATE GLOBAL TEMP VIEW src AS SELECT 1, 2")
+diff --git a/sql/core/src/test/scala/org/apache/spark/sql/execution/PlannerSuite.scala b/sql/core/src/test/scala/org/apache/spark/sql/execution/PlannerSuite.scala
+index 0bfc92f..7b439e0 100644
+--- a/sql/core/src/test/scala/org/apache/spark/sql/execution/PlannerSuite.scala
++++ b/sql/core/src/test/scala/org/apache/spark/sql/execution/PlannerSuite.scala
+@@ -424,7 +424,7 @@ class PlannerSuite extends SharedSQLContext {
+         dataType = LongType,
+         nullable = false
+       ) (exprId = exprId,
+-        qualifier = Some("col1_qualifier")
++        qualifier = Some(Seq("col1_qualifier"))
+       )
+ 
+     val attribute2 =
+diff --git a/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala b/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala
+index faa76b7..7485efa 100644
+--- a/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala
++++ b/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveMetastoreCatalog.scala
+@@ -261,7 +261,7 @@ private[hive] class HiveMetastoreCatalog(sparkSession: SparkSession) extends Log
+         // Read path
+         case relation: MetastoreRelation if shouldConvertMetastoreParquet(relation) =>
+           val parquetRelation = convertToParquetRelation(relation)
+-          SubqueryAlias(relation.tableName, parquetRelation, None)
++          SubqueryAlias(relation.tableName, parquetRelation, None, None)
+       }
+     }
+   }
+@@ -299,7 +299,7 @@ private[hive] class HiveMetastoreCatalog(sparkSession: SparkSession) extends Log
+         // Read path
+         case relation: MetastoreRelation if shouldConvertMetastoreOrc(relation) =>
+           val orcRelation = convertToOrcRelation(relation)
+-          SubqueryAlias(relation.tableName, orcRelation, None)
++          SubqueryAlias(relation.tableName, orcRelation, None, None)
+       }
+     }
+   }
+diff --git a/sql/hive/src/main/scala/org/apache/spark/sql/hive/MetastoreRelation.scala b/sql/hive/src/main/scala/org/apache/spark/sql/hive/MetastoreRelation.scala
+index 346757c..60b2ae3 100644
+--- a/sql/hive/src/main/scala/org/apache/spark/sql/hive/MetastoreRelation.scala
++++ b/sql/hive/src/main/scala/org/apache/spark/sql/hive/MetastoreRelation.scala
+@@ -224,7 +224,7 @@ private[hive] case class MetastoreRelation(
+       f.dataType,
+       // Since data can be dumped in randomly with no validation, everything is nullable.
+       nullable = true
+-    )(qualifier = Some(tableName))
++    )(qualifier = Option(Seq(tableName)))
+   }
+ 
+   /** PartitionKey attributes */
+diff --git a/sql/hive/src/main/scala/org/apache/spark/sql/hive/execution/CreateHiveTableAsSelectCommand.scala b/sql/hive/src/main/scala/org/apache/spark/sql/hive/execution/CreateHiveTableAsSelectCommand.scala
+index ccc2d64..97a8e53 100644
+--- a/sql/hive/src/main/scala/org/apache/spark/sql/hive/execution/CreateHiveTableAsSelectCommand.scala
++++ b/sql/hive/src/main/scala/org/apache/spark/sql/hive/execution/CreateHiveTableAsSelectCommand.scala
+@@ -73,7 +73,7 @@ case class CreateHiveTableAsSelectCommand(
+ 
+       // Get the Metastore Relation
+       sparkSession.sessionState.catalog.lookupRelation(tableIdentifier) match {
+-        case SubqueryAlias(_, r: SimpleCatalogRelation, _) =>
++        case SubqueryAlias(_, r: SimpleCatalogRelation, _, _) =>
+           val tableMeta = r.metadata
+           MetastoreRelation(tableMeta.database, tableMeta.identifier.table)(tableMeta, sparkSession)
+       }
+diff --git a/sql/hive/src/test/resources/sqlgen/cluster_by.sql b/sql/hive/src/test/resources/sqlgen/cluster_by.sql
+index 3154791..bf007a3 100644
+--- a/sql/hive/src/test/resources/sqlgen/cluster_by.sql
++++ b/sql/hive/src/test/resources/sqlgen/cluster_by.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT id FROM parquet_t0 CLUSTER BY id
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_0 CLUSTER BY `gen_attr_0`) AS parquet_t0
++SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_0 CLUSTER BY `gen_attr_0`) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/data_source_json_parquet_t0.sql b/sql/hive/src/test/resources/sqlgen/data_source_json_parquet_t0.sql
+index e41b645..1211550 100644
+--- a/sql/hive/src/test/resources/sqlgen/data_source_json_parquet_t0.sql
++++ b/sql/hive/src/test/resources/sqlgen/data_source_json_parquet_t0.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT id FROM json_parquet_t0
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`json_parquet_t0`) AS gen_subquery_0) AS json_parquet_t0
++SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`json_parquet_t0`) AS gen_subquery_0) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/data_source_orc_parquet_t0.sql b/sql/hive/src/test/resources/sqlgen/data_source_orc_parquet_t0.sql
+index f5ceccd..fcfc0ad 100644
+--- a/sql/hive/src/test/resources/sqlgen/data_source_orc_parquet_t0.sql
++++ b/sql/hive/src/test/resources/sqlgen/data_source_orc_parquet_t0.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT id FROM orc_parquet_t0
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`orc_parquet_t0`) AS gen_subquery_0) AS orc_parquet_t0
++SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`orc_parquet_t0`) AS gen_subquery_0) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/data_source_parquet_parquet_t0.sql b/sql/hive/src/test/resources/sqlgen/data_source_parquet_parquet_t0.sql
+index 2bccefe..f7f6719 100644
+--- a/sql/hive/src/test/resources/sqlgen/data_source_parquet_parquet_t0.sql
++++ b/sql/hive/src/test/resources/sqlgen/data_source_parquet_parquet_t0.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT id FROM parquet_parquet_t0
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_parquet_t0`) AS gen_subquery_0) AS parquet_parquet_t0
++SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_parquet_t0`) AS gen_subquery_0) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/distribute_by.sql b/sql/hive/src/test/resources/sqlgen/distribute_by.sql
+index 72863dc..332ef74 100644
+--- a/sql/hive/src/test/resources/sqlgen/distribute_by.sql
++++ b/sql/hive/src/test/resources/sqlgen/distribute_by.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT id FROM parquet_t0 DISTRIBUTE BY id
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_0 DISTRIBUTE BY `gen_attr_0`) AS parquet_t0
++SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_0 DISTRIBUTE BY `gen_attr_0`) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/distribute_by_with_sort_by.sql b/sql/hive/src/test/resources/sqlgen/distribute_by_with_sort_by.sql
+index 96b9b2d..95da611 100644
+--- a/sql/hive/src/test/resources/sqlgen/distribute_by_with_sort_by.sql
++++ b/sql/hive/src/test/resources/sqlgen/distribute_by_with_sort_by.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT id FROM parquet_t0 DISTRIBUTE BY id SORT BY id
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_0 CLUSTER BY `gen_attr_0`) AS parquet_t0
++SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_0 CLUSTER BY `gen_attr_0`) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/except.sql b/sql/hive/src/test/resources/sqlgen/except.sql
+index 7a7d27f..3a080a7 100644
+--- a/sql/hive/src/test/resources/sqlgen/except.sql
++++ b/sql/hive/src/test/resources/sqlgen/except.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT * FROM t0 EXCEPT SELECT * FROM t0
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM ((SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`t0`) AS gen_subquery_0 ) EXCEPT ( SELECT `gen_attr_1` FROM (SELECT `id` AS `gen_attr_1` FROM `default`.`t0`) AS gen_subquery_1)) AS t0
++SELECT `gen_attr_0` AS `id` FROM ((SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`t0`) AS gen_subquery_0 ) EXCEPT ( SELECT `gen_attr_1` FROM (SELECT `id` AS `gen_attr_1` FROM `default`.`t0`) AS gen_subquery_1)) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/filter_after_subquery.sql b/sql/hive/src/test/resources/sqlgen/filter_after_subquery.sql
+index 9cd6514..87a054f 100644
+--- a/sql/hive/src/test/resources/sqlgen/filter_after_subquery.sql
++++ b/sql/hive/src/test/resources/sqlgen/filter_after_subquery.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT a FROM (SELECT key + 1 AS a FROM parquet_t1) t WHERE a > 5
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `a` FROM (SELECT `gen_attr_0` FROM (SELECT (`gen_attr_1` + CAST(1 AS BIGINT)) AS `gen_attr_0` FROM (SELECT `key` AS `gen_attr_1`, `value` AS `gen_attr_2` FROM `default`.`parquet_t1`) AS gen_subquery_0) AS t WHERE (`gen_attr_0` > CAST(5 AS BIGINT))) AS t
++SELECT `gen_attr_0` AS `a` FROM (SELECT `gen_attr_0` FROM (SELECT (`gen_attr_1` + CAST(1 AS BIGINT)) AS `gen_attr_0` FROM (SELECT `key` AS `gen_attr_1`, `value` AS `gen_attr_2` FROM `default`.`parquet_t1`) AS gen_subquery_0) AS t WHERE (`gen_attr_0` > CAST(5 AS BIGINT))) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/generate_with_other_1.sql b/sql/hive/src/test/resources/sqlgen/generate_with_other_1.sql
+index 0739f8f..0a36891 100644
+--- a/sql/hive/src/test/resources/sqlgen/generate_with_other_1.sql
++++ b/sql/hive/src/test/resources/sqlgen/generate_with_other_1.sql
+@@ -5,4 +5,4 @@ WHERE id > 2
+ ORDER BY val, id
+ LIMIT 5
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `val`, `gen_attr_1` AS `id` FROM ((SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT gen_subquery_0.`gen_attr_2`, gen_subquery_0.`gen_attr_3`, gen_subquery_0.`gen_attr_4`, gen_subquery_0.`gen_attr_1` FROM (SELECT `arr` AS `gen_attr_2`, `arr2` AS `gen_attr_3`, `json` AS `gen_attr_4`, `id` AS `gen_attr_1` FROM `default`.`parquet_t3`) AS gen_subquery_0 WHERE (`gen_attr_1` > CAST(2 AS BIGINT))) AS gen_subquery_1 LATERAL VIEW explode(`gen_attr_2`) gen_subquery_2 AS `gen_attr_0` ORDER BY `gen_attr_0` ASC NULLS FIRST, `gen_attr_1` ASC NULLS FIRST LIMIT 5)) AS parquet_t3
++SELECT `gen_attr_0` AS `val`, `gen_attr_1` AS `id` FROM ((SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT gen_subquery_0.`gen_attr_2`, gen_subquery_0.`gen_attr_3`, gen_subquery_0.`gen_attr_4`, gen_subquery_0.`gen_attr_1` FROM (SELECT `arr` AS `gen_attr_2`, `arr2` AS `gen_attr_3`, `json` AS `gen_attr_4`, `id` AS `gen_attr_1` FROM `default`.`parquet_t3`) AS gen_subquery_0 WHERE (`gen_attr_1` > CAST(2 AS BIGINT))) AS gen_subquery_1 LATERAL VIEW explode(`gen_attr_2`) gen_subquery_3 AS `gen_attr_0` ORDER BY `gen_attr_0` ASC NULLS FIRST, `gen_attr_1` ASC NULLS FIRST LIMIT 5)) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/generator_non_udtf_1.sql b/sql/hive/src/test/resources/sqlgen/generator_non_udtf_1.sql
+index fef65e0..a85d980 100644
+--- a/sql/hive/src/test/resources/sqlgen/generator_non_udtf_1.sql
++++ b/sql/hive/src/test/resources/sqlgen/generator_non_udtf_1.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT EXPLODE(arr), id FROM parquet_t3
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `col`, `gen_attr_1` AS `id` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `arr` AS `gen_attr_2`, `arr2` AS `gen_attr_3`, `json` AS `gen_attr_4`, `id` AS `gen_attr_1` FROM `default`.`parquet_t3`) AS gen_subquery_0 LATERAL VIEW explode(`gen_attr_2`) gen_subquery_1 AS `gen_attr_0`) AS parquet_t3
++SELECT `gen_attr_0` AS `col`, `gen_attr_1` AS `id` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `arr` AS `gen_attr_2`, `arr2` AS `gen_attr_3`, `json` AS `gen_attr_4`, `id` AS `gen_attr_1` FROM `default`.`parquet_t3`) AS gen_subquery_0 LATERAL VIEW explode(`gen_attr_2`) gen_subquery_2 AS `gen_attr_0`) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/in.sql b/sql/hive/src/test/resources/sqlgen/in.sql
+index 7cff62b..a588755 100644
+--- a/sql/hive/src/test/resources/sqlgen/in.sql
++++ b/sql/hive/src/test/resources/sqlgen/in.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT id FROM parquet_t0 WHERE id IN (1, 2, 3)
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_0 WHERE (CAST(`gen_attr_0` AS BIGINT) IN (CAST(1 AS BIGINT), CAST(2 AS BIGINT), CAST(3 AS BIGINT)))) AS parquet_t0
++SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_0 WHERE (CAST(`gen_attr_0` AS BIGINT) IN (CAST(1 AS BIGINT), CAST(2 AS BIGINT), CAST(3 AS BIGINT)))) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/inline_tables.sql b/sql/hive/src/test/resources/sqlgen/inline_tables.sql
+index 18803a3..5695892 100644
+--- a/sql/hive/src/test/resources/sqlgen/inline_tables.sql
++++ b/sql/hive/src/test/resources/sqlgen/inline_tables.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ select * from values ("one", 1), ("two", 2), ("three", null) as data(a, b) where b > 1
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `a`, `gen_attr_1` AS `b` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (VALUES ('one', 1), ('two', 2), ('three', CAST(NULL AS INT)) AS gen_subquery_0(gen_attr_0, gen_attr_1)) AS data WHERE (`gen_attr_1` > 1)) AS data
++SELECT `gen_attr_0` AS `a`, `gen_attr_1` AS `b` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (VALUES ('one', 1), ('two', 2), ('three', CAST(NULL AS INT)) AS gen_subquery_1(gen_attr_0, gen_attr_1)) AS data WHERE (`gen_attr_1` > 1)) AS gen_subquery_0
+diff --git a/sql/hive/src/test/resources/sqlgen/intersect.sql b/sql/hive/src/test/resources/sqlgen/intersect.sql
+index 4143a62..628400e 100644
+--- a/sql/hive/src/test/resources/sqlgen/intersect.sql
++++ b/sql/hive/src/test/resources/sqlgen/intersect.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT * FROM t0 INTERSECT SELECT * FROM t0
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM ((SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`t0`) AS gen_subquery_0 ) INTERSECT ( SELECT `gen_attr_1` FROM (SELECT `id` AS `gen_attr_1` FROM `default`.`t0`) AS gen_subquery_1)) AS t0
++SELECT `gen_attr_0` AS `id` FROM ((SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`t0`) AS gen_subquery_0 ) INTERSECT ( SELECT `gen_attr_1` FROM (SELECT `id` AS `gen_attr_1` FROM `default`.`t0`) AS gen_subquery_1)) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/json_tuple_generator_1.sql b/sql/hive/src/test/resources/sqlgen/json_tuple_generator_1.sql
+index 11e45a4..248b408 100644
+--- a/sql/hive/src/test/resources/sqlgen/json_tuple_generator_1.sql
++++ b/sql/hive/src/test/resources/sqlgen/json_tuple_generator_1.sql
+@@ -3,4 +3,4 @@ SELECT c0, c1, c2
+ FROM parquet_t3
+ LATERAL VIEW JSON_TUPLE(json, 'f1', 'f2', 'f3') jt
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `c0`, `gen_attr_1` AS `c1`, `gen_attr_2` AS `c2` FROM (SELECT `gen_attr_0`, `gen_attr_1`, `gen_attr_2` FROM (SELECT `arr` AS `gen_attr_4`, `arr2` AS `gen_attr_5`, `json` AS `gen_attr_3`, `id` AS `gen_attr_6` FROM `default`.`parquet_t3`) AS gen_subquery_0 LATERAL VIEW json_tuple(`gen_attr_3`, 'f1', 'f2', 'f3') gen_subquery_1 AS `gen_attr_0`, `gen_attr_1`, `gen_attr_2`) AS jt
++SELECT `gen_attr_0` AS `c0`, `gen_attr_1` AS `c1`, `gen_attr_2` AS `c2` FROM (SELECT `gen_attr_0`, `gen_attr_1`, `gen_attr_2` FROM (SELECT `arr` AS `gen_attr_4`, `arr2` AS `gen_attr_5`, `json` AS `gen_attr_3`, `id` AS `gen_attr_6` FROM `default`.`parquet_t3`) AS gen_subquery_0 LATERAL VIEW json_tuple(`gen_attr_3`, 'f1', 'f2', 'f3') gen_subquery_2 AS `gen_attr_0`, `gen_attr_1`, `gen_attr_2`) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/json_tuple_generator_2.sql b/sql/hive/src/test/resources/sqlgen/json_tuple_generator_2.sql
+index d86b39d..e28ad8b 100644
+--- a/sql/hive/src/test/resources/sqlgen/json_tuple_generator_2.sql
++++ b/sql/hive/src/test/resources/sqlgen/json_tuple_generator_2.sql
+@@ -3,4 +3,4 @@ SELECT a, b, c
+ FROM parquet_t3
+ LATERAL VIEW JSON_TUPLE(json, 'f1', 'f2', 'f3') jt AS a, b, c
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `a`, `gen_attr_1` AS `b`, `gen_attr_2` AS `c` FROM (SELECT `gen_attr_0`, `gen_attr_1`, `gen_attr_2` FROM (SELECT `arr` AS `gen_attr_4`, `arr2` AS `gen_attr_5`, `json` AS `gen_attr_3`, `id` AS `gen_attr_6` FROM `default`.`parquet_t3`) AS gen_subquery_0 LATERAL VIEW json_tuple(`gen_attr_3`, 'f1', 'f2', 'f3') gen_subquery_1 AS `gen_attr_0`, `gen_attr_1`, `gen_attr_2`) AS jt
++SELECT `gen_attr_0` AS `a`, `gen_attr_1` AS `b`, `gen_attr_2` AS `c` FROM (SELECT `gen_attr_0`, `gen_attr_1`, `gen_attr_2` FROM (SELECT `arr` AS `gen_attr_4`, `arr2` AS `gen_attr_5`, `json` AS `gen_attr_3`, `id` AS `gen_attr_6` FROM `default`.`parquet_t3`) AS gen_subquery_0 LATERAL VIEW json_tuple(`gen_attr_3`, 'f1', 'f2', 'f3') gen_subquery_2 AS `gen_attr_0`, `gen_attr_1`, `gen_attr_2`) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/limit.sql b/sql/hive/src/test/resources/sqlgen/limit.sql
+index 7a6b060..802502f 100644
+--- a/sql/hive/src/test/resources/sqlgen/limit.sql
++++ b/sql/hive/src/test/resources/sqlgen/limit.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT * FROM (SELECT id FROM tbl LIMIT 2)
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0`, `name` AS `gen_attr_1` FROM `default`.`tbl`) AS gen_subquery_0 LIMIT 2)) AS tbl
++SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0`, `name` AS `gen_attr_1` FROM `default`.`tbl`) AS gen_subquery_0 LIMIT 2)) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/multi_distinct.sql b/sql/hive/src/test/resources/sqlgen/multi_distinct.sql
+index 3ca526f..76bfccb 100644
+--- a/sql/hive/src/test/resources/sqlgen/multi_distinct.sql
++++ b/sql/hive/src/test/resources/sqlgen/multi_distinct.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT a, COUNT(DISTINCT b), COUNT(DISTINCT c), SUM(d) FROM parquet_t2 GROUP BY a
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `a`, `gen_attr_1` AS `count(DISTINCT b)`, `gen_attr_3` AS `count(DISTINCT c)`, `gen_attr_5` AS `sum(d)` FROM (SELECT `gen_attr_0`, count(DISTINCT `gen_attr_2`) AS `gen_attr_1`, count(DISTINCT `gen_attr_4`) AS `gen_attr_3`, sum(`gen_attr_6`) AS `gen_attr_5` FROM (SELECT `a` AS `gen_attr_0`, `b` AS `gen_attr_2`, `c` AS `gen_attr_4`, `d` AS `gen_attr_6` FROM `default`.`parquet_t2`) AS gen_subquery_0 GROUP BY `gen_attr_0`) AS parquet_t2
++SELECT `gen_attr_0` AS `a`, `gen_attr_1` AS `count(DISTINCT b)`, `gen_attr_3` AS `count(DISTINCT c)`, `gen_attr_5` AS `sum(d)` FROM (SELECT `gen_attr_0`, count(DISTINCT `gen_attr_2`) AS `gen_attr_1`, count(DISTINCT `gen_attr_4`) AS `gen_attr_3`, sum(`gen_attr_6`) AS `gen_attr_5` FROM (SELECT `a` AS `gen_attr_0`, `b` AS `gen_attr_2`, `c` AS `gen_attr_4`, `d` AS `gen_attr_6` FROM `default`.`parquet_t2`) AS gen_subquery_0 GROUP BY `gen_attr_0`) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/not_in.sql b/sql/hive/src/test/resources/sqlgen/not_in.sql
+index 797d22e..b8a4ce1 100644
+--- a/sql/hive/src/test/resources/sqlgen/not_in.sql
++++ b/sql/hive/src/test/resources/sqlgen/not_in.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT id FROM t0 WHERE id NOT IN (1, 2, 3)
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`t0`) AS gen_subquery_0 WHERE (NOT (CAST(`gen_attr_0` AS BIGINT) IN (CAST(1 AS BIGINT), CAST(2 AS BIGINT), CAST(3 AS BIGINT))))) AS t0
++SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`t0`) AS gen_subquery_0 WHERE (NOT (CAST(`gen_attr_0` AS BIGINT) IN (CAST(1 AS BIGINT), CAST(2 AS BIGINT), CAST(3 AS BIGINT))))) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/not_like.sql b/sql/hive/src/test/resources/sqlgen/not_like.sql
+index 2248504..8cfe38c 100644
+--- a/sql/hive/src/test/resources/sqlgen/not_like.sql
++++ b/sql/hive/src/test/resources/sqlgen/not_like.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT id FROM t0 WHERE id + 5 NOT LIKE '1%'
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`t0`) AS gen_subquery_0 WHERE (NOT CAST((`gen_attr_0` + CAST(5 AS BIGINT)) AS STRING) LIKE '1%')) AS t0
++SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`t0`) AS gen_subquery_0 WHERE (NOT CAST((`gen_attr_0` + CAST(5 AS BIGINT)) AS STRING) LIKE '1%')) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/predicate_subquery.sql b/sql/hive/src/test/resources/sqlgen/predicate_subquery.sql
+index 6e5bd98..061c96d 100644
+--- a/sql/hive/src/test/resources/sqlgen/predicate_subquery.sql
++++ b/sql/hive/src/test/resources/sqlgen/predicate_subquery.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ select * from t1 b where exists (select * from t1 a)
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `a` FROM (SELECT `gen_attr_0` FROM (SELECT `a` AS `gen_attr_0` FROM `default`.`t1`) AS gen_subquery_0 WHERE EXISTS(SELECT `gen_attr_1` AS `a` FROM ((SELECT `gen_attr_1` FROM (SELECT `a` AS `gen_attr_1` FROM `default`.`t1`) AS gen_subquery_2) AS gen_subquery_1) AS gen_subquery_1)) AS b
++SELECT `gen_attr_0` AS `a` FROM (SELECT `gen_attr_0` FROM (SELECT `a` AS `gen_attr_0` FROM `default`.`t1`) AS gen_subquery_0 WHERE EXISTS(SELECT `gen_attr_1` AS `a` FROM ((SELECT `gen_attr_1` FROM (SELECT `a` AS `gen_attr_1` FROM `default`.`t1`) AS gen_subquery_3) AS gen_subquery_1) AS gen_subquery_4)) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/select_distinct.sql b/sql/hive/src/test/resources/sqlgen/select_distinct.sql
+index 09d93ca..841e364 100644
+--- a/sql/hive/src/test/resources/sqlgen/select_distinct.sql
++++ b/sql/hive/src/test/resources/sqlgen/select_distinct.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT DISTINCT id FROM parquet_t0
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT DISTINCT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_0) AS parquet_t0
++SELECT `gen_attr_0` AS `id` FROM (SELECT DISTINCT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_0) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/select_orc_table.sql b/sql/hive/src/test/resources/sqlgen/select_orc_table.sql
+index 18ff021..47d7b0d 100644
+--- a/sql/hive/src/test/resources/sqlgen/select_orc_table.sql
++++ b/sql/hive/src/test/resources/sqlgen/select_orc_table.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ select * from orc_t
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `c1`, `gen_attr_1` AS `c2` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `c1` AS `gen_attr_0`, `c2` AS `gen_attr_1` FROM `default`.`orc_t`) AS gen_subquery_0) AS orc_t
++SELECT `gen_attr_0` AS `c1`, `gen_attr_1` AS `c2` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `c1` AS `gen_attr_0`, `c2` AS `gen_attr_1` FROM `default`.`orc_t`) AS gen_subquery_0) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/select_parquet_table.sql b/sql/hive/src/test/resources/sqlgen/select_parquet_table.sql
+index d2eac9c..b3e9bc5 100644
+--- a/sql/hive/src/test/resources/sqlgen/select_parquet_table.sql
++++ b/sql/hive/src/test/resources/sqlgen/select_parquet_table.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ select * from parquet_t
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `c1`, `gen_attr_1` AS `c2` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `c1` AS `gen_attr_0`, `c2` AS `gen_attr_1` FROM `default`.`parquet_t`) AS gen_subquery_0) AS parquet_t
++SELECT `gen_attr_0` AS `c1`, `gen_attr_1` AS `c2` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `c1` AS `gen_attr_0`, `c2` AS `gen_attr_1` FROM `default`.`parquet_t`) AS gen_subquery_0) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/self_join.sql b/sql/hive/src/test/resources/sqlgen/self_join.sql
+index d6dcee2..e3c86b9 100644
+--- a/sql/hive/src/test/resources/sqlgen/self_join.sql
++++ b/sql/hive/src/test/resources/sqlgen/self_join.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT x.key FROM parquet_t1 x JOIN parquet_t1 y ON x.key = y.key
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key` FROM (SELECT `gen_attr_0` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_2` FROM `default`.`parquet_t1`) AS gen_subquery_0 INNER JOIN (SELECT `key` AS `gen_attr_1`, `value` AS `gen_attr_3` FROM `default`.`parquet_t1`) AS gen_subquery_1 ON (`gen_attr_0` = `gen_attr_1`)) AS x
++SELECT `gen_attr_0` AS `key` FROM (SELECT `gen_attr_0` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_2` FROM `default`.`parquet_t1`) AS gen_subquery_0 INNER JOIN (SELECT `key` AS `gen_attr_1`, `value` AS `gen_attr_3` FROM `default`.`parquet_t1`) AS gen_subquery_1 ON (`gen_attr_0` = `gen_attr_1`)) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/self_join_with_group_by.sql b/sql/hive/src/test/resources/sqlgen/self_join_with_group_by.sql
+index 1dedb44..6f21e83 100644
+--- a/sql/hive/src/test/resources/sqlgen/self_join_with_group_by.sql
++++ b/sql/hive/src/test/resources/sqlgen/self_join_with_group_by.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT x.key, COUNT(*) FROM parquet_t1 x JOIN parquet_t1 y ON x.key = y.key group by x.key
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `count(1)` FROM (SELECT `gen_attr_0`, count(1) AS `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_3` FROM `default`.`parquet_t1`) AS gen_subquery_0 INNER JOIN (SELECT `key` AS `gen_attr_2`, `value` AS `gen_attr_4` FROM `default`.`parquet_t1`) AS gen_subquery_1 ON (`gen_attr_0` = `gen_attr_2`) GROUP BY `gen_attr_0`) AS x
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `count(1)` FROM (SELECT `gen_attr_0`, count(1) AS `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_3` FROM `default`.`parquet_t1`) AS gen_subquery_0 INNER JOIN (SELECT `key` AS `gen_attr_2`, `value` AS `gen_attr_4` FROM `default`.`parquet_t1`) AS gen_subquery_1 ON (`gen_attr_0` = `gen_attr_2`) GROUP BY `gen_attr_0`) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/subq2.sql b/sql/hive/src/test/resources/sqlgen/subq2.sql
+index ee7e80c..ab8504a 100644
+--- a/sql/hive/src/test/resources/sqlgen/subq2.sql
++++ b/sql/hive/src/test/resources/sqlgen/subq2.sql
+@@ -5,4 +5,4 @@ FROM (SELECT b.key as k, count(1) as c
+       GROUP BY b.key) a
+ WHERE a.k >= 90
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `k`, `gen_attr_1` AS `c` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `gen_attr_2` AS `gen_attr_0`, count(1) AS `gen_attr_1` FROM (SELECT `key` AS `gen_attr_2`, `value` AS `gen_attr_3` FROM `default`.`src`) AS gen_subquery_0 GROUP BY `gen_attr_2`) AS a WHERE (`gen_attr_0` >= 90)) AS a
++SELECT `gen_attr_0` AS `k`, `gen_attr_1` AS `c` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `gen_attr_2` AS `gen_attr_0`, count(1) AS `gen_attr_1` FROM (SELECT `key` AS `gen_attr_2`, `value` AS `gen_attr_3` FROM `default`.`src`) AS gen_subquery_0 GROUP BY `gen_attr_2`) AS a WHERE (`gen_attr_0` >= 90)) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/subquery_exists_1.sql b/sql/hive/src/test/resources/sqlgen/subquery_exists_1.sql
+index bd28d8d..89d07e0 100644
+--- a/sql/hive/src/test/resources/sqlgen/subquery_exists_1.sql
++++ b/sql/hive/src/test/resources/sqlgen/subquery_exists_1.sql
+@@ -5,4 +5,4 @@ where exists (select a.key
+               from src a
+               where b.value = a.value and a.key = b.key and a.value > 'val_9')
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`src`) AS gen_subquery_0 WHERE EXISTS(SELECT `gen_attr_4` AS `1` FROM (SELECT 1 AS `gen_attr_4` FROM (SELECT `gen_attr_3`, `gen_attr_2` FROM (SELECT `key` AS `gen_attr_3`, `value` AS `gen_attr_2` FROM `default`.`src`) AS gen_subquery_2 WHERE (`gen_attr_2` > 'val_9')) AS gen_subquery_1 WHERE ((`gen_attr_1` = `gen_attr_2`) AND (`gen_attr_3` = `gen_attr_0`))) AS gen_subquery_3)) AS b
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`src`) AS gen_subquery_0 WHERE EXISTS(SELECT `gen_attr_4` AS `1` FROM (SELECT 1 AS `gen_attr_4` FROM (SELECT `gen_attr_3`, `gen_attr_2` FROM (SELECT `key` AS `gen_attr_3`, `value` AS `gen_attr_2` FROM `default`.`src`) AS gen_subquery_3 WHERE (`gen_attr_2` > 'val_9')) AS gen_subquery_1 WHERE ((`gen_attr_1` = `gen_attr_2`) AND (`gen_attr_3` = `gen_attr_0`))) AS gen_subquery_4)) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/subquery_exists_2.sql b/sql/hive/src/test/resources/sqlgen/subquery_exists_2.sql
+index d2965fc..4a31bbf 100644
+--- a/sql/hive/src/test/resources/sqlgen/subquery_exists_2.sql
++++ b/sql/hive/src/test/resources/sqlgen/subquery_exists_2.sql
+@@ -6,4 +6,4 @@ from (select *
+                     from src a
+                     where b.value = a.value and a.key = b.key and a.value > 'val_9')) a
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`src`) AS gen_subquery_0 WHERE EXISTS(SELECT `gen_attr_4` AS `1` FROM (SELECT 1 AS `gen_attr_4` FROM (SELECT `gen_attr_3`, `gen_attr_2` FROM (SELECT `key` AS `gen_attr_3`, `value` AS `gen_attr_2` FROM `default`.`src`) AS gen_subquery_2 WHERE (`gen_attr_2` > 'val_9')) AS gen_subquery_1 WHERE ((`gen_attr_1` = `gen_attr_2`) AND (`gen_attr_3` = `gen_attr_0`))) AS gen_subquery_3)) AS a) AS a
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`src`) AS gen_subquery_0 WHERE EXISTS(SELECT `gen_attr_4` AS `1` FROM (SELECT 1 AS `gen_attr_4` FROM (SELECT `gen_attr_3`, `gen_attr_2` FROM (SELECT `key` AS `gen_attr_3`, `value` AS `gen_attr_2` FROM `default`.`src`) AS gen_subquery_3 WHERE (`gen_attr_2` > 'val_9')) AS gen_subquery_1 WHERE ((`gen_attr_1` = `gen_attr_2`) AND (`gen_attr_3` = `gen_attr_0`))) AS gen_subquery_4)) AS a) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/subquery_exists_having_1.sql b/sql/hive/src/test/resources/sqlgen/subquery_exists_having_1.sql
+index 93ce902..64fb17e 100644
+--- a/sql/hive/src/test/resources/sqlgen/subquery_exists_having_1.sql
++++ b/sql/hive/src/test/resources/sqlgen/subquery_exists_having_1.sql
+@@ -6,4 +6,4 @@ having exists (select a.key
+                from src a
+                where a.key = b.key and a.value > 'val_9')
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_1` AS `key`, `gen_attr_2` AS `count(1)` FROM (SELECT `gen_attr_1`, count(1) AS `gen_attr_2` FROM (SELECT `key` AS `gen_attr_1`, `value` AS `gen_attr_3` FROM `default`.`src`) AS gen_subquery_0 GROUP BY `gen_attr_1` HAVING EXISTS(SELECT `gen_attr_4` AS `1` FROM (SELECT 1 AS `gen_attr_4` FROM (SELECT `gen_attr_0` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_5` FROM `default`.`src`) AS gen_subquery_2 WHERE (`gen_attr_5` > 'val_9')) AS gen_subquery_1 WHERE (`gen_attr_0` = `gen_attr_1`)) AS gen_subquery_3)) AS b
++SELECT `gen_attr_1` AS `key`, `gen_attr_2` AS `count(1)` FROM (SELECT `gen_attr_1`, count(1) AS `gen_attr_2` FROM (SELECT `key` AS `gen_attr_1`, `value` AS `gen_attr_3` FROM `default`.`src`) AS gen_subquery_0 GROUP BY `gen_attr_1` HAVING EXISTS(SELECT `gen_attr_4` AS `1` FROM (SELECT 1 AS `gen_attr_4` FROM (SELECT `gen_attr_0` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_5` FROM `default`.`src`) AS gen_subquery_3 WHERE (`gen_attr_5` > 'val_9')) AS gen_subquery_1 WHERE (`gen_attr_0` = `gen_attr_1`)) AS gen_subquery_4)) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/subquery_exists_having_2.sql b/sql/hive/src/test/resources/sqlgen/subquery_exists_having_2.sql
+index 411e073..85e673d 100644
+--- a/sql/hive/src/test/resources/sqlgen/subquery_exists_having_2.sql
++++ b/sql/hive/src/test/resources/sqlgen/subquery_exists_having_2.sql
+@@ -7,4 +7,4 @@ from (select b.key, count(*)
+                      from src a
+                      where a.key = b.key and a.value > 'val_9')) a
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `count(1)` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `gen_attr_0`, count(1) AS `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_3` FROM `default`.`src`) AS gen_subquery_0 GROUP BY `gen_attr_0` HAVING EXISTS(SELECT `gen_attr_4` AS `1` FROM (SELECT 1 AS `gen_attr_4` FROM (SELECT `gen_attr_2` FROM (SELECT `key` AS `gen_attr_2`, `value` AS `gen_attr_5` FROM `default`.`src`) AS gen_subquery_2 WHERE (`gen_attr_5` > 'val_9')) AS gen_subquery_1 WHERE (`gen_attr_2` = `gen_attr_0`)) AS gen_subquery_3)) AS a) AS a
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `count(1)` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `gen_attr_0`, count(1) AS `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_3` FROM `default`.`src`) AS gen_subquery_0 GROUP BY `gen_attr_0` HAVING EXISTS(SELECT `gen_attr_4` AS `1` FROM (SELECT 1 AS `gen_attr_4` FROM (SELECT `gen_attr_2` FROM (SELECT `key` AS `gen_attr_2`, `value` AS `gen_attr_5` FROM `default`.`src`) AS gen_subquery_3 WHERE (`gen_attr_5` > 'val_9')) AS gen_subquery_1 WHERE (`gen_attr_2` = `gen_attr_0`)) AS gen_subquery_4)) AS a) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/subquery_exists_having_3.sql b/sql/hive/src/test/resources/sqlgen/subquery_exists_having_3.sql
+index b2ed0b0..49f8ae9 100644
+--- a/sql/hive/src/test/resources/sqlgen/subquery_exists_having_3.sql
++++ b/sql/hive/src/test/resources/sqlgen/subquery_exists_having_3.sql
+@@ -6,4 +6,4 @@ having exists (select a.key
+                from src a
+                where a.value > 'val_9' and a.value = min(b.value))
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `min(value)` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `gen_attr_0`, min(`gen_attr_4`) AS `gen_attr_1`, min(`gen_attr_4`) AS `gen_attr_3` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_4` FROM `default`.`src`) AS gen_subquery_0 GROUP BY `gen_attr_0` HAVING EXISTS(SELECT `gen_attr_5` AS `1` FROM (SELECT 1 AS `gen_attr_5` FROM (SELECT `gen_attr_6`, `gen_attr_2` FROM (SELECT `key` AS `gen_attr_6`, `value` AS `gen_attr_2` FROM `default`.`src`) AS gen_subquery_3 WHERE (`gen_attr_2` > 'val_9')) AS gen_subquery_2 WHERE (`gen_attr_2` = `gen_attr_3`)) AS gen_subquery_4)) AS gen_subquery_1) AS b
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `min(value)` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `gen_attr_0`, min(`gen_attr_4`) AS `gen_attr_1`, min(`gen_attr_4`) AS `gen_attr_3` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_4` FROM `default`.`src`) AS gen_subquery_0 GROUP BY `gen_attr_0` HAVING EXISTS(SELECT `gen_attr_5` AS `1` FROM (SELECT 1 AS `gen_attr_5` FROM (SELECT `gen_attr_6`, `gen_attr_2` FROM (SELECT `key` AS `gen_attr_6`, `value` AS `gen_attr_2` FROM `default`.`src`) AS gen_subquery_4 WHERE (`gen_attr_2` > 'val_9')) AS gen_subquery_2 WHERE (`gen_attr_2` = `gen_attr_3`)) AS gen_subquery_5)) AS gen_subquery_1) AS gen_subquery_3
+diff --git a/sql/hive/src/test/resources/sqlgen/subquery_in.sql b/sql/hive/src/test/resources/sqlgen/subquery_in.sql
+index 0fe6224..0c4651b 100644
+--- a/sql/hive/src/test/resources/sqlgen/subquery_in.sql
++++ b/sql/hive/src/test/resources/sqlgen/subquery_in.sql
+@@ -3,4 +3,4 @@ SELECT key
+ FROM src
+ WHERE key in (SELECT max(key) FROM src)
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key` FROM (SELECT `gen_attr_0` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_2` FROM `default`.`src`) AS gen_subquery_0 WHERE (`gen_attr_0` IN (SELECT `gen_attr_3` AS `_c0` FROM (SELECT `gen_attr_1` AS `gen_attr_3` FROM (SELECT max(`gen_attr_4`) AS `gen_attr_1` FROM (SELECT `key` AS `gen_attr_4`, `value` AS `gen_attr_5` FROM `default`.`src`) AS gen_subquery_2) AS gen_subquery_1) AS gen_subquery_3))) AS src
++SELECT `gen_attr_0` AS `key` FROM (SELECT `gen_attr_0` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_2` FROM `default`.`src`) AS gen_subquery_0 WHERE (`gen_attr_0` IN (SELECT `gen_attr_3` AS `_c0` FROM (SELECT `gen_attr_1` AS `gen_attr_3` FROM (SELECT max(`gen_attr_4`) AS `gen_attr_1` FROM (SELECT `key` AS `gen_attr_4`, `value` AS `gen_attr_5` FROM `default`.`src`) AS gen_subquery_3) AS gen_subquery_1) AS gen_subquery_4))) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/subquery_in_having_1.sql b/sql/hive/src/test/resources/sqlgen/subquery_in_having_1.sql
+index 2588214..3475d30 100644
+--- a/sql/hive/src/test/resources/sqlgen/subquery_in_having_1.sql
++++ b/sql/hive/src/test/resources/sqlgen/subquery_in_having_1.sql
+@@ -5,4 +5,4 @@ group by key
+ having count(*) in (select count(*) from src s1 where s1.key = '90' group by s1.key)
+ order by key
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `count(1)` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `gen_attr_0`, count(1) AS `gen_attr_1`, count(1) AS `gen_attr_2` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_4` FROM `default`.`src`) AS gen_subquery_0 GROUP BY `gen_attr_0` HAVING (`gen_attr_2` IN (SELECT `gen_attr_5` AS `_c0` FROM (SELECT `gen_attr_3` AS `gen_attr_5` FROM (SELECT count(1) AS `gen_attr_3` FROM (SELECT `key` AS `gen_attr_6`, `value` AS `gen_attr_7` FROM `default`.`src`) AS gen_subquery_3 WHERE (CAST(`gen_attr_6` AS DOUBLE) = CAST('90' AS DOUBLE)) GROUP BY `gen_attr_6`) AS gen_subquery_2) AS gen_subquery_4))) AS gen_subquery_1 ORDER BY `gen_attr_0` ASC NULLS FIRST) AS src
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `count(1)` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `gen_attr_0`, count(1) AS `gen_attr_1`, count(1) AS `gen_attr_2` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_4` FROM `default`.`src`) AS gen_subquery_0 GROUP BY `gen_attr_0` HAVING (`gen_attr_2` IN (SELECT `gen_attr_5` AS `_c0` FROM (SELECT `gen_attr_3` AS `gen_attr_5` FROM (SELECT count(1) AS `gen_attr_3` FROM (SELECT `key` AS `gen_attr_6`, `value` AS `gen_attr_7` FROM `default`.`src`) AS gen_subquery_4 WHERE (CAST(`gen_attr_6` AS DOUBLE) = CAST('90' AS DOUBLE)) GROUP BY `gen_attr_6`) AS gen_subquery_2) AS gen_subquery_5))) AS gen_subquery_1 ORDER BY `gen_attr_0` ASC NULLS FIRST) AS gen_subquery_3
+diff --git a/sql/hive/src/test/resources/sqlgen/subquery_in_having_2.sql b/sql/hive/src/test/resources/sqlgen/subquery_in_having_2.sql
+index cdda29a..f02e27b 100644
+--- a/sql/hive/src/test/resources/sqlgen/subquery_in_having_2.sql
++++ b/sql/hive/src/test/resources/sqlgen/subquery_in_having_2.sql
+@@ -7,4 +7,4 @@ having b.key in (select a.key
+                  where a.value > 'val_9' and a.value = min(b.value))
+ order by b.key
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `min(value)` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `gen_attr_0`, min(`gen_attr_5`) AS `gen_attr_1`, min(`gen_attr_5`) AS `gen_attr_4` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_5` FROM `default`.`src`) AS gen_subquery_0 GROUP BY `gen_attr_0` HAVING (named_struct('gen_attr_0', `gen_attr_0`, 'gen_attr_4', `gen_attr_4`) IN (SELECT `gen_attr_6` AS `_c0`, `gen_attr_7` AS `_c1` FROM (SELECT `gen_attr_2` AS `gen_attr_6`, `gen_attr_3` AS `gen_attr_7` FROM (SELECT `gen_attr_2`, `gen_attr_3` FROM (SELECT `key` AS `gen_attr_2`, `value` AS `gen_attr_3` FROM `default`.`src`) AS gen_subquery_3 WHERE (`gen_attr_3` > 'val_9')) AS gen_subquery_2) AS gen_subquery_4))) AS gen_subquery_1 ORDER BY `gen_attr_0` ASC NULLS FIRST) AS b
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `min(value)` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `gen_attr_0`, min(`gen_attr_5`) AS `gen_attr_1`, min(`gen_attr_5`) AS `gen_attr_4` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_5` FROM `default`.`src`) AS gen_subquery_0 GROUP BY `gen_attr_0` HAVING (named_struct('gen_attr_0', `gen_attr_0`, 'gen_attr_4', `gen_attr_4`) IN (SELECT `gen_attr_6` AS `_c0`, `gen_attr_7` AS `_c1` FROM (SELECT `gen_attr_2` AS `gen_attr_6`, `gen_attr_3` AS `gen_attr_7` FROM (SELECT `gen_attr_2`, `gen_attr_3` FROM (SELECT `key` AS `gen_attr_2`, `value` AS `gen_attr_3` FROM `default`.`src`) AS gen_subquery_4 WHERE (`gen_attr_3` > 'val_9')) AS gen_subquery_2) AS gen_subquery_5))) AS gen_subquery_1 ORDER BY `gen_attr_0` ASC NULLS FIRST) AS gen_subquery_3
+diff --git a/sql/hive/src/test/resources/sqlgen/subquery_not_exists_1.sql b/sql/hive/src/test/resources/sqlgen/subquery_not_exists_1.sql
+index eed20a5..2148c27 100644
+--- a/sql/hive/src/test/resources/sqlgen/subquery_not_exists_1.sql
++++ b/sql/hive/src/test/resources/sqlgen/subquery_not_exists_1.sql
+@@ -5,4 +5,4 @@ where not exists (select a.key
+                   from src a
+                   where b.value = a.value  and a.key = b.key and a.value > 'val_2')
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`src`) AS gen_subquery_0 WHERE (NOT EXISTS(SELECT `gen_attr_4` AS `1` FROM (SELECT 1 AS `gen_attr_4` FROM (SELECT `gen_attr_3`, `gen_attr_2` FROM (SELECT `key` AS `gen_attr_3`, `value` AS `gen_attr_2` FROM `default`.`src`) AS gen_subquery_2 WHERE (`gen_attr_2` > 'val_2')) AS gen_subquery_1 WHERE ((`gen_attr_1` = `gen_attr_2`) AND (`gen_attr_3` = `gen_attr_0`))) AS gen_subquery_3))) AS b
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`src`) AS gen_subquery_0 WHERE (NOT EXISTS(SELECT `gen_attr_4` AS `1` FROM (SELECT 1 AS `gen_attr_4` FROM (SELECT `gen_attr_3`, `gen_attr_2` FROM (SELECT `key` AS `gen_attr_3`, `value` AS `gen_attr_2` FROM `default`.`src`) AS gen_subquery_3 WHERE (`gen_attr_2` > 'val_2')) AS gen_subquery_1 WHERE ((`gen_attr_1` = `gen_attr_2`) AND (`gen_attr_3` = `gen_attr_0`))) AS gen_subquery_4))) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/subquery_not_exists_2.sql b/sql/hive/src/test/resources/sqlgen/subquery_not_exists_2.sql
+index 7040e10..3f956cc 100644
+--- a/sql/hive/src/test/resources/sqlgen/subquery_not_exists_2.sql
++++ b/sql/hive/src/test/resources/sqlgen/subquery_not_exists_2.sql
+@@ -5,4 +5,4 @@ where not exists (select a.key
+                   from src a
+                   where b.value = a.value and a.value > 'val_2')
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`src`) AS gen_subquery_0 WHERE (NOT EXISTS(SELECT `gen_attr_3` AS `1` FROM (SELECT 1 AS `gen_attr_3` FROM (SELECT `gen_attr_4`, `gen_attr_2` FROM (SELECT `key` AS `gen_attr_4`, `value` AS `gen_attr_2` FROM `default`.`src`) AS gen_subquery_2 WHERE (`gen_attr_2` > 'val_2')) AS gen_subquery_1 WHERE (`gen_attr_1` = `gen_attr_2`)) AS gen_subquery_3))) AS b
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`src`) AS gen_subquery_0 WHERE (NOT EXISTS(SELECT `gen_attr_3` AS `1` FROM (SELECT 1 AS `gen_attr_3` FROM (SELECT `gen_attr_4`, `gen_attr_2` FROM (SELECT `key` AS `gen_attr_4`, `value` AS `gen_attr_2` FROM `default`.`src`) AS gen_subquery_3 WHERE (`gen_attr_2` > 'val_2')) AS gen_subquery_1 WHERE (`gen_attr_1` = `gen_attr_2`)) AS gen_subquery_4))) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/subquery_not_exists_having_1.sql b/sql/hive/src/test/resources/sqlgen/subquery_not_exists_having_1.sql
+index 3c0e90e..6795578 100644
+--- a/sql/hive/src/test/resources/sqlgen/subquery_not_exists_having_1.sql
++++ b/sql/hive/src/test/resources/sqlgen/subquery_not_exists_having_1.sql
+@@ -6,4 +6,4 @@ having not exists (select a.key
+                    from src a
+                    where b.value = a.value  and a.key = b.key and a.value > 'val_12')
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_3` AS `key`, `gen_attr_0` AS `value` FROM (SELECT `gen_attr_3`, `gen_attr_0` FROM (SELECT `key` AS `gen_attr_3`, `value` AS `gen_attr_0` FROM `default`.`src`) AS gen_subquery_0 GROUP BY `gen_attr_3`, `gen_attr_0` HAVING (NOT EXISTS(SELECT `gen_attr_4` AS `1` FROM (SELECT 1 AS `gen_attr_4` FROM (SELECT `gen_attr_2`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_2`, `value` AS `gen_attr_1` FROM `default`.`src`) AS gen_subquery_2 WHERE (`gen_attr_1` > 'val_12')) AS gen_subquery_1 WHERE ((`gen_attr_0` = `gen_attr_1`) AND (`gen_attr_2` = `gen_attr_3`))) AS gen_subquery_3))) AS b
++SELECT `gen_attr_3` AS `key`, `gen_attr_0` AS `value` FROM (SELECT `gen_attr_3`, `gen_attr_0` FROM (SELECT `key` AS `gen_attr_3`, `value` AS `gen_attr_0` FROM `default`.`src`) AS gen_subquery_0 GROUP BY `gen_attr_3`, `gen_attr_0` HAVING (NOT EXISTS(SELECT `gen_attr_4` AS `1` FROM (SELECT 1 AS `gen_attr_4` FROM (SELECT `gen_attr_2`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_2`, `value` AS `gen_attr_1` FROM `default`.`src`) AS gen_subquery_3 WHERE (`gen_attr_1` > 'val_12')) AS gen_subquery_1 WHERE ((`gen_attr_0` = `gen_attr_1`) AND (`gen_attr_2` = `gen_attr_3`))) AS gen_subquery_4))) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/subquery_not_exists_having_2.sql b/sql/hive/src/test/resources/sqlgen/subquery_not_exists_having_2.sql
+index 0c16f9e..346f8e4 100644
+--- a/sql/hive/src/test/resources/sqlgen/subquery_not_exists_having_2.sql
++++ b/sql/hive/src/test/resources/sqlgen/subquery_not_exists_having_2.sql
+@@ -6,4 +6,4 @@ having not exists (select distinct a.key
+                    from src a
+                    where b.value = a.value and a.value > 'val_12')
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_2` AS `key`, `gen_attr_0` AS `value` FROM (SELECT `gen_attr_2`, `gen_attr_0` FROM (SELECT `key` AS `gen_attr_2`, `value` AS `gen_attr_0` FROM `default`.`src`) AS gen_subquery_0 GROUP BY `gen_attr_2`, `gen_attr_0` HAVING (NOT EXISTS(SELECT `gen_attr_3` AS `1` FROM (SELECT 1 AS `gen_attr_3` FROM (SELECT DISTINCT `gen_attr_4`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_4`, `value` AS `gen_attr_1` FROM `default`.`src`) AS gen_subquery_2 WHERE (`gen_attr_1` > 'val_12')) AS gen_subquery_1 WHERE (`gen_attr_0` = `gen_attr_1`)) AS gen_subquery_3))) AS b
++SELECT `gen_attr_2` AS `key`, `gen_attr_0` AS `value` FROM (SELECT `gen_attr_2`, `gen_attr_0` FROM (SELECT `key` AS `gen_attr_2`, `value` AS `gen_attr_0` FROM `default`.`src`) AS gen_subquery_0 GROUP BY `gen_attr_2`, `gen_attr_0` HAVING (NOT EXISTS(SELECT `gen_attr_3` AS `1` FROM (SELECT 1 AS `gen_attr_3` FROM (SELECT DISTINCT `gen_attr_4`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_4`, `value` AS `gen_attr_1` FROM `default`.`src`) AS gen_subquery_3 WHERE (`gen_attr_1` > 'val_12')) AS gen_subquery_1 WHERE (`gen_attr_0` = `gen_attr_1`)) AS gen_subquery_4))) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/tablesample_1.sql b/sql/hive/src/test/resources/sqlgen/tablesample_1.sql
+index 291f2f5..41a1b41 100644
+--- a/sql/hive/src/test/resources/sqlgen/tablesample_1.sql
++++ b/sql/hive/src/test/resources/sqlgen/tablesample_1.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT s.id FROM parquet_t0 TABLESAMPLE(100 PERCENT) s
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0` TABLESAMPLE(100.0 PERCENT)) AS gen_subquery_0) AS s
++SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0` TABLESAMPLE(100.0 PERCENT)) AS gen_subquery_0) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/tablesample_2.sql b/sql/hive/src/test/resources/sqlgen/tablesample_2.sql
+index 6a92d7a..bcddc03 100644
+--- a/sql/hive/src/test/resources/sqlgen/tablesample_2.sql
++++ b/sql/hive/src/test/resources/sqlgen/tablesample_2.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT * FROM parquet_t0 TABLESAMPLE(100 PERCENT)
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0` TABLESAMPLE(100.0 PERCENT)) AS gen_subquery_0) AS parquet_t0
++SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0` TABLESAMPLE(100.0 PERCENT)) AS gen_subquery_0) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/tablesample_3.sql b/sql/hive/src/test/resources/sqlgen/tablesample_3.sql
+index 4a17d71..1e08f57 100644
+--- a/sql/hive/src/test/resources/sqlgen/tablesample_3.sql
++++ b/sql/hive/src/test/resources/sqlgen/tablesample_3.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT s.id FROM t0 TABLESAMPLE(100 PERCENT) s
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`t0` TABLESAMPLE(100.0 PERCENT)) AS gen_subquery_0) AS s
++SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`t0` TABLESAMPLE(100.0 PERCENT)) AS gen_subquery_0) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/tablesample_4.sql b/sql/hive/src/test/resources/sqlgen/tablesample_4.sql
+index 873de05..99dede5 100644
+--- a/sql/hive/src/test/resources/sqlgen/tablesample_4.sql
++++ b/sql/hive/src/test/resources/sqlgen/tablesample_4.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT * FROM t0 TABLESAMPLE(100 PERCENT)
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`t0` TABLESAMPLE(100.0 PERCENT)) AS gen_subquery_0) AS t0
++SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`t0` TABLESAMPLE(100.0 PERCENT)) AS gen_subquery_0) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/tablesample_5.sql b/sql/hive/src/test/resources/sqlgen/tablesample_5.sql
+index f958b2f..e2550d4 100644
+--- a/sql/hive/src/test/resources/sqlgen/tablesample_5.sql
++++ b/sql/hive/src/test/resources/sqlgen/tablesample_5.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT s.id FROM parquet_t0 TABLESAMPLE(0.1 PERCENT) s WHERE 1=0
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0` TABLESAMPLE(0.1 PERCENT)) AS gen_subquery_0 WHERE (1 = 0)) AS s
++SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0` TABLESAMPLE(0.1 PERCENT)) AS gen_subquery_0 WHERE (1 = 0)) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/tablesample_6.sql b/sql/hive/src/test/resources/sqlgen/tablesample_6.sql
+index 688a102..554b8b7 100644
+--- a/sql/hive/src/test/resources/sqlgen/tablesample_6.sql
++++ b/sql/hive/src/test/resources/sqlgen/tablesample_6.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT * FROM parquet_t0 TABLESAMPLE(0.1 PERCENT) WHERE 1=0
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0` TABLESAMPLE(0.1 PERCENT)) AS gen_subquery_0 WHERE (1 = 0)) AS parquet_t0
++SELECT `gen_attr_0` AS `id` FROM (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0` TABLESAMPLE(0.1 PERCENT)) AS gen_subquery_0 WHERE (1 = 0)) AS gen_subquery_1
+diff --git a/sql/hive/src/test/resources/sqlgen/three_child_union.sql b/sql/hive/src/test/resources/sqlgen/three_child_union.sql
+index 713c750..d0f21c5 100644
+--- a/sql/hive/src/test/resources/sqlgen/three_child_union.sql
++++ b/sql/hive/src/test/resources/sqlgen/three_child_union.sql
+@@ -3,4 +3,4 @@ SELECT id FROM parquet_t0
+ UNION ALL SELECT id FROM parquet_t0
+ UNION ALL SELECT id FROM parquet_t0
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM ((SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_0) UNION ALL (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_1) UNION ALL (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_2)) AS parquet_t0
++SELECT `gen_attr_0` AS `id` FROM ((SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_0) UNION ALL (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_1) UNION ALL (SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_2)) AS gen_subquery_3
+diff --git a/sql/hive/src/test/resources/sqlgen/type_widening.sql b/sql/hive/src/test/resources/sqlgen/type_widening.sql
+index ebb8a92..4f3dc8a 100644
+--- a/sql/hive/src/test/resources/sqlgen/type_widening.sql
++++ b/sql/hive/src/test/resources/sqlgen/type_widening.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT id FROM parquet_t0 UNION ALL SELECT CAST(id AS INT) AS id FROM parquet_t0
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM ((SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_0) UNION ALL (SELECT CAST(CAST(`gen_attr_0` AS INT) AS BIGINT) AS `gen_attr_1` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_1)) AS parquet_t0
++SELECT `gen_attr_0` AS `id` FROM ((SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_0) UNION ALL (SELECT CAST(CAST(`gen_attr_0` AS INT) AS BIGINT) AS `gen_attr_1` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`parquet_t0`) AS gen_subquery_1)) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/union_distinct.sql b/sql/hive/src/test/resources/sqlgen/union_distinct.sql
+index 46644b8..9eced66 100644
+--- a/sql/hive/src/test/resources/sqlgen/union_distinct.sql
++++ b/sql/hive/src/test/resources/sqlgen/union_distinct.sql
+@@ -1,4 +1,4 @@
+ -- This file is automatically generated by LogicalPlanToSQLSuite.
+ SELECT * FROM t0 UNION SELECT * FROM t0
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `id` FROM ((SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`t0`) AS gen_subquery_0) UNION DISTINCT (SELECT `gen_attr_1` FROM (SELECT `id` AS `gen_attr_1` FROM `default`.`t0`) AS gen_subquery_1)) AS t0
++SELECT `gen_attr_0` AS `id` FROM ((SELECT `gen_attr_0` FROM (SELECT `id` AS `gen_attr_0` FROM `default`.`t0`) AS gen_subquery_0) UNION DISTINCT (SELECT `gen_attr_1` FROM (SELECT `id` AS `gen_attr_1` FROM `default`.`t0`) AS gen_subquery_1)) AS gen_subquery_2
+diff --git a/sql/hive/src/test/resources/sqlgen/window_basic_2.sql b/sql/hive/src/test/resources/sqlgen/window_basic_2.sql
+index 0e2a9a5..47b8961 100644
+--- a/sql/hive/src/test/resources/sqlgen/window_basic_2.sql
++++ b/sql/hive/src/test/resources/sqlgen/window_basic_2.sql
+@@ -2,4 +2,4 @@
+ SELECT key, value, ROUND(AVG(key) OVER (), 2)
+ FROM parquet_t1 ORDER BY key
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value`, `gen_attr_2` AS `round(avg(key) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING), 2)` FROM (SELECT `gen_attr_0`, `gen_attr_1`, round(`gen_attr_3`, 2) AS `gen_attr_2` FROM (SELECT gen_subquery_1.`gen_attr_0`, gen_subquery_1.`gen_attr_1`, avg(`gen_attr_0`) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS `gen_attr_3` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`parquet_t1`) AS gen_subquery_0) AS gen_subquery_1) AS gen_subquery_2 ORDER BY `gen_attr_0` ASC NULLS FIRST) AS parquet_t1
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value`, `gen_attr_2` AS `round(avg(key) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING), 2)` FROM (SELECT `gen_attr_0`, `gen_attr_1`, round(`gen_attr_3`, 2) AS `gen_attr_2` FROM (SELECT gen_subquery_1.`gen_attr_0`, gen_subquery_1.`gen_attr_1`, avg(`gen_attr_0`) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS `gen_attr_3` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`parquet_t1`) AS gen_subquery_0) AS gen_subquery_1) AS gen_subquery_2 ORDER BY `gen_attr_0` ASC NULLS FIRST) AS gen_subquery_3
+diff --git a/sql/hive/src/test/resources/sqlgen/window_basic_3.sql b/sql/hive/src/test/resources/sqlgen/window_basic_3.sql
+index d727caa..e02ecd7 100644
+--- a/sql/hive/src/test/resources/sqlgen/window_basic_3.sql
++++ b/sql/hive/src/test/resources/sqlgen/window_basic_3.sql
+@@ -2,4 +2,4 @@
+ SELECT value, MAX(key + 1) OVER (PARTITION BY key % 5 ORDER BY key % 7) AS max
+ FROM parquet_t1
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `value`, `gen_attr_1` AS `max` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT gen_subquery_1.`gen_attr_0`, gen_subquery_1.`gen_attr_2`, gen_subquery_1.`gen_attr_3`, gen_subquery_1.`gen_attr_4`, max(`gen_attr_2`) OVER (PARTITION BY `gen_attr_3` ORDER BY `gen_attr_4` ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `gen_attr_1` FROM (SELECT `gen_attr_0`, (`gen_attr_5` + CAST(1 AS BIGINT)) AS `gen_attr_2`, (`gen_attr_5` % CAST(5 AS BIGINT)) AS `gen_attr_3`, (`gen_attr_5` % CAST(7 AS BIGINT)) AS `gen_attr_4` FROM (SELECT `key` AS `gen_attr_5`, `value` AS `gen_attr_0` FROM `default`.`parquet_t1`) AS gen_subquery_0) AS gen_subquery_1) AS gen_subquery_2) AS parquet_t1
++SELECT `gen_attr_0` AS `value`, `gen_attr_1` AS `max` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT gen_subquery_1.`gen_attr_0`, gen_subquery_1.`gen_attr_2`, gen_subquery_1.`gen_attr_3`, gen_subquery_1.`gen_attr_4`, max(`gen_attr_2`) OVER (PARTITION BY `gen_attr_3` ORDER BY `gen_attr_4` ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `gen_attr_1` FROM (SELECT `gen_attr_0`, (`gen_attr_5` + CAST(1 AS BIGINT)) AS `gen_attr_2`, (`gen_attr_5` % CAST(5 AS BIGINT)) AS `gen_attr_3`, (`gen_attr_5` % CAST(7 AS BIGINT)) AS `gen_attr_4` FROM (SELECT `key` AS `gen_attr_5`, `value` AS `gen_attr_0` FROM `default`.`parquet_t1`) AS gen_subquery_0) AS gen_subquery_1) AS gen_subquery_2) AS gen_subquery_3
+diff --git a/sql/hive/src/test/resources/sqlgen/window_basic_asc_nulls_last.sql b/sql/hive/src/test/resources/sqlgen/window_basic_asc_nulls_last.sql
+index 4739f05..758b0bc 100644
+--- a/sql/hive/src/test/resources/sqlgen/window_basic_asc_nulls_last.sql
++++ b/sql/hive/src/test/resources/sqlgen/window_basic_asc_nulls_last.sql
+@@ -2,4 +2,4 @@
+ SELECT key, value, ROUND(AVG(key) OVER (), 2)
+ FROM parquet_t1 ORDER BY key nulls last
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value`, `gen_attr_2` AS `round(avg(key) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING), 2)` FROM (SELECT `gen_attr_0`, `gen_attr_1`, round(`gen_attr_3`, 2) AS `gen_attr_2` FROM (SELECT gen_subquery_1.`gen_attr_0`, gen_subquery_1.`gen_attr_1`, avg(`gen_attr_0`) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS `gen_attr_3` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`parquet_t1`) AS gen_subquery_0) AS gen_subquery_1) AS gen_subquery_2 ORDER BY `gen_attr_0` ASC NULLS LAST) AS parquet_t1
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value`, `gen_attr_2` AS `round(avg(key) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING), 2)` FROM (SELECT `gen_attr_0`, `gen_attr_1`, round(`gen_attr_3`, 2) AS `gen_attr_2` FROM (SELECT gen_subquery_1.`gen_attr_0`, gen_subquery_1.`gen_attr_1`, avg(`gen_attr_0`) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS `gen_attr_3` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`parquet_t1`) AS gen_subquery_0) AS gen_subquery_1) AS gen_subquery_2 ORDER BY `gen_attr_0` ASC NULLS LAST) AS gen_subquery_3
+diff --git a/sql/hive/src/test/resources/sqlgen/window_basic_desc_nulls_first.sql b/sql/hive/src/test/resources/sqlgen/window_basic_desc_nulls_first.sql
+index 1b9db29..755c3c5 100644
+--- a/sql/hive/src/test/resources/sqlgen/window_basic_desc_nulls_first.sql
++++ b/sql/hive/src/test/resources/sqlgen/window_basic_desc_nulls_first.sql
+@@ -2,4 +2,4 @@
+ SELECT key, value, ROUND(AVG(key) OVER (), 2)
+ FROM parquet_t1 ORDER BY key desc nulls first
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value`, `gen_attr_2` AS `round(avg(key) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING), 2)` FROM (SELECT `gen_attr_0`, `gen_attr_1`, round(`gen_attr_3`, 2) AS `gen_attr_2` FROM (SELECT gen_subquery_1.`gen_attr_0`, gen_subquery_1.`gen_attr_1`, avg(`gen_attr_0`) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS `gen_attr_3` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`parquet_t1`) AS gen_subquery_0) AS gen_subquery_1) AS gen_subquery_2 ORDER BY `gen_attr_0` DESC NULLS FIRST) AS parquet_t1
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value`, `gen_attr_2` AS `round(avg(key) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING), 2)` FROM (SELECT `gen_attr_0`, `gen_attr_1`, round(`gen_attr_3`, 2) AS `gen_attr_2` FROM (SELECT gen_subquery_1.`gen_attr_0`, gen_subquery_1.`gen_attr_1`, avg(`gen_attr_0`) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS `gen_attr_3` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`parquet_t1`) AS gen_subquery_0) AS gen_subquery_1) AS gen_subquery_2 ORDER BY `gen_attr_0` DESC NULLS FIRST) AS gen_subquery_3
+diff --git a/sql/hive/src/test/resources/sqlgen/window_with_join.sql b/sql/hive/src/test/resources/sqlgen/window_with_join.sql
+index 43d5b47..2788473 100644
+--- a/sql/hive/src/test/resources/sqlgen/window_with_join.sql
++++ b/sql/hive/src/test/resources/sqlgen/window_with_join.sql
+@@ -2,4 +2,4 @@
+ SELECT x.key, MAX(y.key) OVER (PARTITION BY x.key % 5 ORDER BY x.key)
+ FROM parquet_t1 x JOIN parquet_t1 y ON x.key = y.key
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `max(key) OVER (PARTITION BY (key % CAST(5 AS BIGINT)) ORDER BY key ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT gen_subquery_2.`gen_attr_0`, gen_subquery_2.`gen_attr_2`, gen_subquery_2.`gen_attr_3`, max(`gen_attr_2`) OVER (PARTITION BY `gen_attr_3` ORDER BY `gen_attr_0` ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `gen_attr_1` FROM (SELECT `gen_attr_0`, `gen_attr_2`, (`gen_attr_0` % CAST(5 AS BIGINT)) AS `gen_attr_3` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_4` FROM `default`.`parquet_t1`) AS gen_subquery_0 INNER JOIN (SELECT `key` AS `gen_attr_2`, `value` AS `gen_attr_5` FROM `default`.`parquet_t1`) AS gen_subquery_1 ON (`gen_attr_0` = `gen_attr_2`)) AS gen_subquery_2) AS gen_subquery_3) AS x
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `max(key) OVER (PARTITION BY (key % CAST(5 AS BIGINT)) ORDER BY key ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT gen_subquery_2.`gen_attr_0`, gen_subquery_2.`gen_attr_2`, gen_subquery_2.`gen_attr_3`, max(`gen_attr_2`) OVER (PARTITION BY `gen_attr_3` ORDER BY `gen_attr_0` ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `gen_attr_1` FROM (SELECT `gen_attr_0`, `gen_attr_2`, (`gen_attr_0` % CAST(5 AS BIGINT)) AS `gen_attr_3` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_4` FROM `default`.`parquet_t1`) AS gen_subquery_0 INNER JOIN (SELECT `key` AS `gen_attr_2`, `value` AS `gen_attr_5` FROM `default`.`parquet_t1`) AS gen_subquery_1 ON (`gen_attr_0` = `gen_attr_2`)) AS gen_subquery_2) AS gen_subquery_3) AS gen_subquery_4
+diff --git a/sql/hive/src/test/resources/sqlgen/window_with_the_same_window_with_agg.sql b/sql/hive/src/test/resources/sqlgen/window_with_the_same_window_with_agg.sql
+index 33a8e83..7a7b4db 100644
+--- a/sql/hive/src/test/resources/sqlgen/window_with_the_same_window_with_agg.sql
++++ b/sql/hive/src/test/resources/sqlgen/window_with_the_same_window_with_agg.sql
+@@ -4,4 +4,4 @@ DENSE_RANK() OVER (DISTRIBUTE BY key SORT BY key, value) AS dr,
+ COUNT(key)
+ FROM parquet_t1 GROUP BY key, value
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value`, `gen_attr_2` AS `dr`, `gen_attr_3` AS `count(key)` FROM (SELECT `gen_attr_0`, `gen_attr_1`, `gen_attr_2`, `gen_attr_3` FROM (SELECT gen_subquery_1.`gen_attr_0`, gen_subquery_1.`gen_attr_1`, gen_subquery_1.`gen_attr_3`, DENSE_RANK() OVER (PARTITION BY `gen_attr_0` ORDER BY `gen_attr_0` ASC NULLS FIRST, `gen_attr_1` ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `gen_attr_2` FROM (SELECT `gen_attr_0`, `gen_attr_1`, count(`gen_attr_0`) AS `gen_attr_3` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`parquet_t1`) AS gen_subquery_0 GROUP BY `gen_attr_0`, `gen_attr_1`) AS gen_subquery_1) AS gen_subquery_2) AS parquet_t1
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value`, `gen_attr_2` AS `dr`, `gen_attr_3` AS `count(key)` FROM (SELECT `gen_attr_0`, `gen_attr_1`, `gen_attr_2`, `gen_attr_3` FROM (SELECT gen_subquery_1.`gen_attr_0`, gen_subquery_1.`gen_attr_1`, gen_subquery_1.`gen_attr_3`, DENSE_RANK() OVER (PARTITION BY `gen_attr_0` ORDER BY `gen_attr_0` ASC NULLS FIRST, `gen_attr_1` ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `gen_attr_2` FROM (SELECT `gen_attr_0`, `gen_attr_1`, count(`gen_attr_0`) AS `gen_attr_3` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`parquet_t1`) AS gen_subquery_0 GROUP BY `gen_attr_0`, `gen_attr_1`) AS gen_subquery_1) AS gen_subquery_2) AS gen_subquery_3
+diff --git a/sql/hive/src/test/resources/sqlgen/window_with_the_same_window_with_agg_filter.sql b/sql/hive/src/test/resources/sqlgen/window_with_the_same_window_with_agg_filter.sql
+index e01bc03..b4f5cdf 100644
+--- a/sql/hive/src/test/resources/sqlgen/window_with_the_same_window_with_agg_filter.sql
++++ b/sql/hive/src/test/resources/sqlgen/window_with_the_same_window_with_agg_filter.sql
+@@ -4,4 +4,4 @@ DENSE_RANK() OVER (DISTRIBUTE BY key SORT BY key, value) AS dr,
+ COUNT(key) OVER(DISTRIBUTE BY key SORT BY key, value) AS ca
+ FROM parquet_t1
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value`, `gen_attr_2` AS `dr`, `gen_attr_3` AS `ca` FROM (SELECT `gen_attr_0`, `gen_attr_1`, `gen_attr_2`, `gen_attr_3` FROM (SELECT gen_subquery_1.`gen_attr_0`, gen_subquery_1.`gen_attr_1`, DENSE_RANK() OVER (PARTITION BY `gen_attr_0` ORDER BY `gen_attr_0` ASC NULLS FIRST, `gen_attr_1` ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `gen_attr_2`, count(`gen_attr_0`) OVER (PARTITION BY `gen_attr_0` ORDER BY `gen_attr_0` ASC NULLS FIRST, `gen_attr_1` ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `gen_attr_3` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`parquet_t1`) AS gen_subquery_0) AS gen_subquery_1) AS gen_subquery_2) AS parquet_t1
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value`, `gen_attr_2` AS `dr`, `gen_attr_3` AS `ca` FROM (SELECT `gen_attr_0`, `gen_attr_1`, `gen_attr_2`, `gen_attr_3` FROM (SELECT gen_subquery_1.`gen_attr_0`, gen_subquery_1.`gen_attr_1`, DENSE_RANK() OVER (PARTITION BY `gen_attr_0` ORDER BY `gen_attr_0` ASC NULLS FIRST, `gen_attr_1` ASC NULLS FIRST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `gen_attr_2`, count(`gen_attr_0`) OVER (PARTITION BY `gen_attr_0` ORDER BY `gen_attr_0` ASC NULLS FIRST, `gen_attr_1` ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `gen_attr_3` FROM (SELECT `gen_attr_0`, `gen_attr_1` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`parquet_t1`) AS gen_subquery_0) AS gen_subquery_1) AS gen_subquery_2) AS gen_subquery_3
+diff --git a/sql/hive/src/test/resources/sqlgen/window_with_the_same_window_with_agg_functions.sql b/sql/hive/src/test/resources/sqlgen/window_with_the_same_window_with_agg_functions.sql
+index dbfa408..d05763b 100644
+--- a/sql/hive/src/test/resources/sqlgen/window_with_the_same_window_with_agg_functions.sql
++++ b/sql/hive/src/test/resources/sqlgen/window_with_the_same_window_with_agg_functions.sql
+@@ -3,4 +3,4 @@ SELECT key, value,
+ MAX(value) OVER (PARTITION BY key % 5 ORDER BY key) AS max
+ FROM parquet_t1 GROUP BY key, value
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value`, `gen_attr_2` AS `max` FROM (SELECT `gen_attr_0`, `gen_attr_1`, `gen_attr_2` FROM (SELECT gen_subquery_1.`gen_attr_0`, gen_subquery_1.`gen_attr_1`, gen_subquery_1.`gen_attr_3`, max(`gen_attr_1`) OVER (PARTITION BY `gen_attr_3` ORDER BY `gen_attr_0` ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `gen_attr_2` FROM (SELECT `gen_attr_0`, `gen_attr_1`, (`gen_attr_0` % CAST(5 AS BIGINT)) AS `gen_attr_3` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`parquet_t1`) AS gen_subquery_0 GROUP BY `gen_attr_0`, `gen_attr_1`) AS gen_subquery_1) AS gen_subquery_2) AS parquet_t1
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value`, `gen_attr_2` AS `max` FROM (SELECT `gen_attr_0`, `gen_attr_1`, `gen_attr_2` FROM (SELECT gen_subquery_1.`gen_attr_0`, gen_subquery_1.`gen_attr_1`, gen_subquery_1.`gen_attr_3`, max(`gen_attr_1`) OVER (PARTITION BY `gen_attr_3` ORDER BY `gen_attr_0` ASC NULLS FIRST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `gen_attr_2` FROM (SELECT `gen_attr_0`, `gen_attr_1`, (`gen_attr_0` % CAST(5 AS BIGINT)) AS `gen_attr_3` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`parquet_t1`) AS gen_subquery_0 GROUP BY `gen_attr_0`, `gen_attr_1`) AS gen_subquery_1) AS gen_subquery_2) AS gen_subquery_3
+diff --git a/sql/hive/src/test/resources/sqlgen/window_with_the_same_window_with_agg_having.sql b/sql/hive/src/test/resources/sqlgen/window_with_the_same_window_with_agg_having.sql
+index 6f5741b..ed64213 100644
+--- a/sql/hive/src/test/resources/sqlgen/window_with_the_same_window_with_agg_having.sql
++++ b/sql/hive/src/test/resources/sqlgen/window_with_the_same_window_with_agg_having.sql
+@@ -3,4 +3,4 @@ SELECT key, value,
+ MAX(value) OVER (PARTITION BY key % 5 ORDER BY key DESC) AS max
+ FROM parquet_t1 GROUP BY key, value HAVING key > 5
+ --------------------------------------------------------------------------------
+-SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value`, `gen_attr_2` AS `max` FROM (SELECT `gen_attr_0`, `gen_attr_1`, `gen_attr_2` FROM (SELECT gen_subquery_1.`gen_attr_0`, gen_subquery_1.`gen_attr_1`, gen_subquery_1.`gen_attr_3`, max(`gen_attr_1`) OVER (PARTITION BY `gen_attr_3` ORDER BY `gen_attr_0` DESC NULLS LAST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `gen_attr_2` FROM (SELECT `gen_attr_0`, `gen_attr_1`, (`gen_attr_0` % CAST(5 AS BIGINT)) AS `gen_attr_3` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`parquet_t1`) AS gen_subquery_0 GROUP BY `gen_attr_0`, `gen_attr_1` HAVING (`gen_attr_0` > CAST(5 AS BIGINT))) AS gen_subquery_1) AS gen_subquery_2) AS parquet_t1
++SELECT `gen_attr_0` AS `key`, `gen_attr_1` AS `value`, `gen_attr_2` AS `max` FROM (SELECT `gen_attr_0`, `gen_attr_1`, `gen_attr_2` FROM (SELECT gen_subquery_1.`gen_attr_0`, gen_subquery_1.`gen_attr_1`, gen_subquery_1.`gen_attr_3`, max(`gen_attr_1`) OVER (PARTITION BY `gen_attr_3` ORDER BY `gen_attr_0` DESC NULLS LAST RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS `gen_attr_2` FROM (SELECT `gen_attr_0`, `gen_attr_1`, (`gen_attr_0` % CAST(5 AS BIGINT)) AS `gen_attr_3` FROM (SELECT `key` AS `gen_attr_0`, `value` AS `gen_attr_1` FROM `default`.`parquet_t1`) AS gen_subquery_0 GROUP BY `gen_attr_0`, `gen_attr_1` HAVING (`gen_attr_0` > CAST(5 AS BIGINT))) AS gen_subquery_1) AS gen_subquery_2) AS gen_subquery_3
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/hive/ErrorPositionSuite.scala b/sql/hive/src/test/scala/org/apache/spark/sql/hive/ErrorPositionSuite.scala
+index aa1973d..0cefd62 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/hive/ErrorPositionSuite.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/hive/ErrorPositionSuite.scala
+@@ -139,7 +139,6 @@ class ErrorPositionSuite extends QueryTest with TestHiveSingleton with BeforeAnd
+       }
+ 
+       assert(!error.getMessage.contains("Seq("))
+-      assert(!error.getMessage.contains("List("))
+ 
+       val (line, expectedLineNum) = query.split("\n").zipWithIndex.collect {
+         case (l, i) if l.contains(token) => (l, i + 1)
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveMetastoreCatalogSuite.scala b/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveMetastoreCatalogSuite.scala
+index 16cf4d7..30aa6c8 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveMetastoreCatalogSuite.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/hive/HiveMetastoreCatalogSuite.scala
+@@ -62,7 +62,7 @@ class HiveMetastoreCatalogSuite extends TestHiveSingleton with SQLTestUtils {
+       spark.sql("create view vw1 as select 1 as id")
+       val plan = spark.sql("select id from vw1").queryExecution.analyzed
+       val aliases = plan.collect {
+-        case x @ SubqueryAlias("vw1", _, Some(TableIdentifier("vw1", Some("default")))) => x
++        case x @ SubqueryAlias("vw1", _, Some(TableIdentifier("vw1", Some("default"))), _) => x
+       }
+       assert(aliases.size == 1)
+     }
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/hive/execution/ColumnResolutionSuite.scala b/sql/hive/src/test/scala/org/apache/spark/sql/hive/execution/ColumnResolutionSuite.scala
+new file mode 100644
+index 0000000..f575b5e
+--- /dev/null
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/hive/execution/ColumnResolutionSuite.scala
+@@ -0,0 +1,287 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.spark.sql.hive.execution
++
++import java.io.File
++
++import org.apache.spark.sql.{AnalysisException, QueryTest, Row}
++import org.apache.spark.sql.hive.test.TestHiveSingleton
++import org.apache.spark.sql.internal.SQLConf
++import org.apache.spark.sql.test.SQLTestUtils
++
++class ColumnResolutionSuite extends QueryTest with SQLTestUtils with TestHiveSingleton {
++
++  import spark.implicits._
++
++  def columnResolutionTests(db1: String, db2: String): Unit = {
++    spark.catalog.setCurrentDatabase(db1)
++
++    checkAnswer(spark.sql("select i1 from t1"), Row(1))
++    checkAnswer(spark.sql(s"select i1 from ${db1}.t1"), Row(1))
++
++    checkAnswer(spark.sql("select t1.i1 from t1"), Row(1))
++    checkAnswer(spark.sql(s"select t1.i1 from ${db1}.t1"), Row(1))
++
++    checkAnswer(spark.sql(s"select ${db1}.t1.i1 from t1"), Row(1))
++    checkAnswer(spark.sql(s"select ${db1}.t1.i1 from ${db1}.t1"), Row(1))
++
++    // Change current database to db2
++    spark.catalog.setCurrentDatabase(db2)
++    checkAnswer(spark.sql("select i1 from t1"), Row(20))
++    checkAnswer(spark.sql(s"select i1 from ${db1}.t1"), Row(1))
++
++    checkAnswer(spark.sql("select t1.i1 from t1"), Row(20))
++    checkAnswer(spark.sql(s"select t1.i1 from ${db1}.t1"), Row(1))
++
++    intercept[AnalysisException] {
++      spark.sql(s"select ${db1}.t1.i1 from t1")
++    }
++
++    checkAnswer(spark.sql(s"select ${db1}.t1.i1 from ${db1}.t1"), Row(1))
++  }
++
++  test("column resolution scenarios with non datasource table") {
++    val currentDb = spark.catalog.currentDatabase
++    withTempDatabase { db1 =>
++      withTempDatabase { db2 =>
++        try {
++          spark.catalog.setCurrentDatabase(db1)
++          spark.sql("create table t1(i1 int)")
++          spark.sql("insert into t1 values(1)")
++          spark.catalog.setCurrentDatabase(db2)
++          spark.sql("create table t1(i1 int)")
++          spark.sql("insert into t1 values(20)")
++
++          columnResolutionTests(db1, db2)
++        } finally {
++          spark.catalog.setCurrentDatabase(currentDb)
++        }
++      }
++    }
++  }
++
++  test("column resolution scenarios with datasource table") {
++    val currentDb = spark.catalog.currentDatabase
++    withTempDatabase { db1 =>
++      withTempDatabase { db2 =>
++        withTempDir { f =>
++          try {
++            val df = Seq(1).toDF()
++            val path = s"${f.getCanonicalPath}${File.separator}test1"
++            df.write.csv(path)
++            spark.catalog.setCurrentDatabase(db1)
++
++            sql(
++              s"""
++                |create table t1(i1 int) using csv options
++                |(path "${path}", header "false")
++              """.stripMargin)
++
++            spark.catalog.setCurrentDatabase(db2)
++            val df2 = Seq(20).toDF()
++            val path2 = s"${f.getCanonicalPath}${File.separator}test2"
++            df2.write.csv(path2)
++
++            sql(
++              s"""
++                |create table t1(i1 int) using csv options
++                |(path "${path2}", header "false")
++              """.stripMargin)
++
++            columnResolutionTests(db1, db2)
++          } finally {
++            spark.catalog.setCurrentDatabase (currentDb)
++          }
++        }
++      }
++    }
++  }
++
++  test("column resolution scenarios with ambiguous cases") {
++    val currentDb = spark.catalog.currentDatabase
++    withSQLConf(SQLConf.CROSS_JOINS_ENABLED.key -> "true") {
++      withTempDatabase { db1 =>
++        withTempDatabase { db2 =>
++          withTempPath { f =>
++            try {
++              spark.catalog.setCurrentDatabase(db1)
++              spark.sql("create table t1(i1 int)")
++              spark.sql("insert into t1 values(1)")
++              spark.catalog.setCurrentDatabase(db2)
++              spark.sql("create table t1(i1 int)")
++              spark.sql("insert into t1 values(20)")
++
++              spark.catalog.setCurrentDatabase(db1)
++
++              intercept[AnalysisException] {
++                spark.sql(s"select i1 from t1, ${db1}.t1")
++              }
++
++              intercept[AnalysisException] {
++                spark.sql(s"select t1.i1 from t1, ${db1}.t1")
++              }
++
++              intercept[AnalysisException] {
++                spark.sql(s"select ${db1}.t1.i1 from t1, ${db1}.t1")
++              }
++
++              intercept[AnalysisException] {
++                spark.sql(s"select i1 from t1, ${db2}.t1")
++              }
++
++              intercept[AnalysisException] {
++                spark.sql(s"select t1.i1 from t1, ${db2}.t1")
++              }
++
++              checkAnswer(spark.sql(s"select ${db1}.t1.i1 from t1, ${db2}.t1"), Row(1))
++              checkAnswer(spark.sql(s"select ${db1}.t1.i1 from ${db1}.t1, ${db2}.t1"), Row(1))
++
++              spark.catalog.setCurrentDatabase(db2)
++
++              intercept[AnalysisException] {
++                spark.sql(s"select i1 from t1, ${db1}.t1")
++              }
++
++              intercept[AnalysisException] {
++                spark.sql(s"select t1.i1 from t1, ${db1}.t1")
++              }
++
++              checkAnswer(spark.sql(s"select ${db1}.t1.i1 from t1, ${db1}.t1"), Row(1))
++
++              intercept[AnalysisException] {
++                spark.sql(s"select i1 from t1, ${db2}.t1")
++              }
++
++              intercept[AnalysisException] {
++                spark.sql(s"select t1.i1 from t1, ${db2}.t1")
++              }
++
++              intercept[AnalysisException] {
++                spark.sql(s"select ${db1}.t1.i1 from t1, ${db2}.t1")
++              }
++            } finally {
++              spark.catalog.setCurrentDatabase(currentDb)
++            }
++          }
++        }
++      }
++    }
++  }
++
++  test("resolve fully qualified table name in star expansion ") {
++    val currentDb = spark.catalog.currentDatabase
++    withTempDatabase { db1 =>
++      withTempDatabase { db2 =>
++        withTempPath { f =>
++          try {
++            val df = spark.range(1).toDF()
++            df.write.csv(f.getCanonicalPath)
++            spark.catalog.setCurrentDatabase(db1)
++
++            sql(
++              s"""
++                |create table t1(i1 int) using csv options
++                |(path "${f.getCanonicalPath}", header "false")
++              """.stripMargin)
++
++            spark.catalog.setCurrentDatabase(db2)
++            spark.sql("create table t1(i1 int)")
++            spark.sql("insert into t1 values(20)")
++
++            spark.catalog.setCurrentDatabase(db1)
++            checkAnswer(spark.sql("select t1.* from t1"), Row(0))
++            checkAnswer(spark.sql(s"select ${db1}.t1.* from ${db1}.t1"), Row(0))
++            checkAnswer(spark.sql(s"select t1.* from ${db1}.t1"), Row(0))
++
++            spark.catalog.setCurrentDatabase(db2)
++            checkAnswer(spark.sql("select t1.* from t1"), Row(20))
++            checkAnswer(spark.sql(s"select ${db1}.t1.* from ${db1}.t1"), Row(0))
++            checkAnswer(spark.sql(s"select t1.* from ${db1}.t1"), Row(0))
++
++          } finally {
++            spark.catalog.setCurrentDatabase(currentDb)
++          }
++        }
++      }
++    }
++  }
++
++  test("resolve in case of subquery") {
++    val currentDb = spark.catalog.currentDatabase
++    withTempDatabase { db1 =>
++      withTempDir { f =>
++        try {
++          val df = Seq((4, 1), (3, 1)).toDF()
++          val path = s"${f.getCanonicalPath}${File.separator}test1"
++          df.write.csv(path)
++          spark.catalog.setCurrentDatabase(db1)
++
++          sql(
++            s"""
++               |create table t3(c1 int, c2 int) using csv options
++               |(path "${path}", header "false")
++            """.stripMargin)
++
++          val df2 = Seq((4, 1), (2, 1)).toDF()
++          val path2 = s"${f.getCanonicalPath}${File.separator}test2"
++          df2.write.csv(path2)
++
++          sql(
++            s"""
++               |create table t4(c2 int, c3 int) using csv options
++               |(path "${path2}", header "false")
++            """.stripMargin)
++
++          checkAnswer(spark.sql("select * from t3 where c1 in " +
++            "(select c2 from t4 where t4.c3 = t3.c2)"), Row(4, 1))
++
++          checkAnswer(spark.sql(s"select * from ${db1}.t3 where c1 in " +
++            s"(select ${db1}.t4.c2 from ${db1}.t4 where ${db1}.t4.c3 = ${db1}.t3.c2)"), Row(4, 1))
++
++        } finally {
++          spark.catalog.setCurrentDatabase(currentDb)
++        }
++      }
++    }
++  }
++
++  test("col resolution - error case") {
++    val currentDb = spark.catalog.currentDatabase
++    withTempDatabase { db1 =>
++      withTempPath { f =>
++        try {
++          spark.catalog.setCurrentDatabase(db1)
++          spark.sql("create table t1(i1 int)")
++          spark.sql("insert into t1 values(1)")
++          intercept[AnalysisException] {
++            spark.sql(s"select ${db1}.t1 from t1")
++          }
++          intercept[AnalysisException] {
++            spark.sql(s"select t1.x.y.* from t1").show
++          }
++          intercept[AnalysisException] {
++            spark.sql(s"select t1 from ${db1}.t1").show
++          }
++        } finally {
++          spark.catalog.setCurrentDatabase(currentDb)
++        }
++      }
++    }
++  }
++}
++
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/hive/execution/SQLQuerySuite.scala b/sql/hive/src/test/scala/org/apache/spark/sql/hive/execution/SQLQuerySuite.scala
+index 104b525..6a5010a 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/hive/execution/SQLQuerySuite.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/hive/execution/SQLQuerySuite.scala
+@@ -17,6 +17,7 @@
+ 
+ package org.apache.spark.sql.hive.execution
+ 
++
+ import java.io.File
+ import java.nio.charset.StandardCharsets
+ import java.sql.{Date, Timestamp}
+@@ -1030,7 +1031,7 @@ class SQLQuerySuite extends QueryTest with SQLTestUtils with TestHiveSingleton {
+     withSQLConf(SQLConf.CONVERT_CTAS.key -> "false") {
+       sql("CREATE TABLE explodeTest (key bigInt)")
+       table("explodeTest").queryExecution.analyzed match {
+-        case SubqueryAlias(_, r: MetastoreRelation, _) => // OK
++        case SubqueryAlias(_, r: MetastoreRelation, _, _) => // OK
+         case _ =>
+           fail("To correctly test the fix of SPARK-5875, explodeTest should be a MetastoreRelation")
+       }
+diff --git a/sql/hive/src/test/scala/org/apache/spark/sql/hive/execution/SQLViewSuite.scala b/sql/hive/src/test/scala/org/apache/spark/sql/hive/execution/SQLViewSuite.scala
+index 2658e2c..60fbf0c 100644
+--- a/sql/hive/src/test/scala/org/apache/spark/sql/hive/execution/SQLViewSuite.scala
++++ b/sql/hive/src/test/scala/org/apache/spark/sql/hive/execution/SQLViewSuite.scala
+@@ -48,6 +48,17 @@ class SQLViewSuite extends QueryTest with SQLTestUtils with TestHiveSingleton {
+     }
+   }
+ 
++  test("column resolution scenarios with local temp view") {
++    val df = Seq(2).toDF("i1")
++    df.createOrReplaceTempView("table1")
++    withTempView("table1") {
++      checkAnswer(spark.sql("select table1.* from table1"), Row(2))
++      checkAnswer(spark.sql("select * from table1"), Row(2))
++      checkAnswer(spark.sql("select i1 from table1"), Row(2))
++      checkAnswer(spark.sql("select table1.i1 from table1"), Row(2))
++    }
++  }
++
+   test("create a temp view on a permanent view") {
+     withView("jtv1", "temp_jtv1") {
+       sql("CREATE VIEW jtv1 AS SELECT * FROM jt WHERE id > 3")
+@@ -582,6 +593,31 @@ class SQLViewSuite extends QueryTest with SQLTestUtils with TestHiveSingleton {
+     }
+   }
+ 
++  test("nested view - column resolution with 3 part name") {
++    withTempDatabase { db =>
++      withView(s"$db.view2", s"$db.view1") {
++        sql(s"create view $db.view1(x, y) as select * from jt")
++        activateDatabase(db) {
++          sql(s"create view view2(m, n) as select * from view1")
++          checkAnswer(sql("SELECT m, n FROM view2 ORDER BY m"), (1 to 9).map(i => Row(i, i)))
++          checkAnswer(sql(s"SELECT m, n FROM $db.view2 ORDER BY n"),
++            (1 to 9).map(i => Row(i, i)))
++          checkAnswer(sql(s"SELECT view2.m, view2.n FROM $db.view2 ORDER BY m"),
++            (1 to 9).map(i => Row(i, i)))
++          checkAnswer(sql(s"SELECT $db.view2.m, $db.view2.n FROM $db.view2 ORDER BY m"),
++            (1 to 9).map(i => Row(i, i)))
++          checkAnswer(sql("SELECT x,y FROM view1 ORDER BY x"), (1 to 9).map(i => Row(i, i)))
++          checkAnswer(sql(s"SELECT x,y FROM $db.view1 ORDER BY x"),
++            (1 to 9).map(i => Row(i, i)))
++          checkAnswer(sql(s"SELECT view1.x, view1.y FROM $db.view1 ORDER BY x"),
++            (1 to 9).map(i => Row(i, i)))
++          checkAnswer(sql(s"SELECT $db.view1.x, $db.view1.y FROM $db.view1 ORDER BY x"),
++            (1 to 9).map(i => Row(i, i)))
++        }
++      }
++    }
++  }
++
+   test("correctly resolve a view with CTE") {
+     withView("cte_view") {
+       val cte_view = CatalogTable(

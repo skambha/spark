@@ -255,8 +255,9 @@ case class UnresolvedStar(target: Option[Seq[String]]) extends Star with Unevalu
     val matched = if (nameParts.size == qualifierList.size) {
       (nameParts corresponds qualifierList) (resolver(_, _))
     } else {
-      // Check if it matches the table name part in the qualifier
-      if (qualifierList.size > 1) {
+      // Check if it matches the table in the qualifier
+      // To handle scenario select t1.* from db1.t1
+      if (nameParts.size == 1) {
         resolver(nameParts(0), qualifierList.last)
       } else {
         false
@@ -344,9 +345,7 @@ case class MultiAlias(child: Expression, names: Seq[String])
  */
 case class ResolvedStar(expressions: Seq[NamedExpression]) extends Star with Unevaluable {
   override def newInstance(): NamedExpression = throw new UnresolvedException(this, "newInstance")
-  override def expand(
-      input: LogicalPlan,
-      resolver: Resolver): Seq[NamedExpression] = expressions
+  override def expand(input: LogicalPlan, resolver: Resolver): Seq[NamedExpression] = expressions
   override def toString: String = expressions.mkString("ResolvedStar(", ", ", ")")
 }
 

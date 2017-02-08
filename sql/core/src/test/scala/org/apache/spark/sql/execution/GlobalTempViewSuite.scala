@@ -158,7 +158,6 @@ class GlobalTempViewSuite extends QueryTest with SharedSQLContext {
       checkAnswer(spark.sql(s"select ${globalTempDB}.t1.* from ${globalTempDB}.t1"), Row(1))
       checkAnswer(spark.sql(s"select i1 from ${globalTempDB}.t1"), Row(1))
       checkAnswer(spark.sql(s"select ${globalTempDB}.t1.i1 from ${globalTempDB}.t1"), Row(1))
-
       checkAnswer(spark.sql(s"select t1.i1 from ${globalTempDB}.t1"), Row(1))
     } finally {
       spark.catalog.dropGlobalTempView("t1")

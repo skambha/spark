@@ -54,8 +54,8 @@ class ColumnResolutionSuite extends QueryTest with SharedSQLContext {
 
   test("column resolution scenarios with datasource table") {
     val currentDb = spark.catalog.currentDatabase
-    withTempDatabase(db1 => {
-      withTempDatabase(db2 => {
+    withTempDatabase { db1 =>
+      withTempDatabase { db2 =>
         withTempDir(f => {
           try {
             val df = Seq(1).toDF()
@@ -85,7 +85,7 @@ class ColumnResolutionSuite extends QueryTest with SharedSQLContext {
             spark.catalog.setCurrentDatabase (currentDb)
           }
         })
-      })
-    })
+      }
+    }
   }
 }

@@ -57,8 +57,8 @@ class ColumnResolutionSuite extends QueryTest with SQLTestUtils with TestHiveSin
 
   test("column resolution scenarios with non datasource table") {
     val currentDb = spark.catalog.currentDatabase
-    withTempDatabase(db1 => {
-      withTempDatabase(db2 => {
+    withTempDatabase { db1 =>
+      withTempDatabase { db2 =>
         try {
           spark.catalog.setCurrentDatabase(db1)
           spark.sql("create table t1(i1 int)")
@@ -71,15 +71,15 @@ class ColumnResolutionSuite extends QueryTest with SQLTestUtils with TestHiveSin
         } finally {
           spark.catalog.setCurrentDatabase(currentDb)
         }
-      })
-    })
+      }
+    }
   }
 
   test("column resolution scenarios with datasource table") {
     val currentDb = spark.catalog.currentDatabase
-    withTempDatabase(db1 => {
-      withTempDatabase(db2 => {
-        withTempDir(f => {
+    withTempDatabase { db1 =>
+      withTempDatabase { db2 =>
+        withTempDir { f =>
           try {
             val df = Seq(1).toDF()
             val path = s"${f.getCanonicalPath}${File.separator}test1"
@@ -107,17 +107,17 @@ class ColumnResolutionSuite extends QueryTest with SQLTestUtils with TestHiveSin
           } finally {
             spark.catalog.setCurrentDatabase (currentDb)
           }
-        })
-      })
-    })
+        }
+      }
+    }
   }
 
   test("column resolution scenarios with ambiguous cases") {
     val currentDb = spark.catalog.currentDatabase
     withSQLConf(SQLConf.CROSS_JOINS_ENABLED.key -> "true") {
-      withTempDatabase(db1 => {
-        withTempDatabase(db2 => {
-          withTempPath(f => {
+      withTempDatabase { db1 =>
+        withTempDatabase { db2 =>
+          withTempPath { f =>
             try {
               spark.catalog.setCurrentDatabase(db1)
               spark.sql("create table t1(i1 int)")
@@ -177,17 +177,17 @@ class ColumnResolutionSuite extends QueryTest with SQLTestUtils with TestHiveSin
             } finally {
               spark.catalog.setCurrentDatabase(currentDb)
             }
-          })
-        })
-      })
+          }
+        }
+      }
     }
   }
 
   test("resolve fully qualified table name in star expansion ") {
     val currentDb = spark.catalog.currentDatabase
-    withTempDatabase(db1 => {
-      withTempDatabase(db2 => {
-        withTempPath(f => {
+    withTempDatabase { db1 =>
+      withTempDatabase { db2 =>
+        withTempPath { f =>
           try {
             val df = spark.range(1).toDF()
             df.write.csv(f.getCanonicalPath)
@@ -216,15 +216,15 @@ class ColumnResolutionSuite extends QueryTest with SQLTestUtils with TestHiveSin
           } finally {
             spark.catalog.setCurrentDatabase(currentDb)
           }
-        })
-      })
-    })
+        }
+      }
+    }
   }
 
   test("resolve in case of subquery") {
     val currentDb = spark.catalog.currentDatabase
-    withTempDatabase(db1 => {
-      withTempDir(f => {
+    withTempDatabase { db1 =>
+      withTempDir { f =>
         try {
           val df = Seq((4, 1), (3, 1)).toDF()
           val path = s"${f.getCanonicalPath}${File.separator}test1"
@@ -256,27 +256,32 @@ class ColumnResolutionSuite extends QueryTest with SQLTestUtils with TestHiveSin
         } finally {
           spark.catalog.setCurrentDatabase(currentDb)
         }
-      })
-    })
+      }
+    }
   }
 
   test("col resolution - error case") {
     val currentDb = spark.catalog.currentDatabase
-    spark.sql("create database db1")
-    withTempDatabase(db1 => {
-      withTempPath(f => {
+    withTempDatabase { db1 =>
+      withTempPath { f =>
         try {
-          spark.catalog.setCurrentDatabase("db1")
+          spark.catalog.setCurrentDatabase(db1)
           spark.sql("create table t1(i1 int)")
           spark.sql("insert into t1 values(1)")
           intercept[AnalysisException] {
             spark.sql(s"select ${db1}.t1 from t1")
           }
+          intercept[AnalysisException] {
+            spark.sql(s"select t1.x.y.* from t1").show
+          }
+          intercept[AnalysisException] {
+            spark.sql(s"select t1 from ${db1}.t1").show
+          }
         } finally {
           spark.catalog.setCurrentDatabase(currentDb)
         }
-      })
-    })
+      }
+    }
   }
-
 }
+

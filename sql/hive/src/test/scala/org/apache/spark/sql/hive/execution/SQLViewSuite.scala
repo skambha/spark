@@ -591,47 +591,25 @@ class SQLViewSuite extends QueryTest with SQLTestUtils with TestHiveSingleton {
     }
   }
 
-  test("correctly resolve a nested view - with 3 part column name") {
+  test("nested view - column resolution with 3 part name") {
     withTempDatabase { db =>
       withView(s"$db.view2", s"$db.view1") {
-        val view1 = CatalogTable(
-          identifier = TableIdentifier("view1", Some(db)),
-          tableType = CatalogTableType.VIEW,
-          storage = CatalogStorageFormat.empty,
-          schema = new StructType().add("x", "long").add("y", "long"),
-          viewOriginalText = Some("SELECT * FROM jt"),
-          viewText = Some("SELECT * FROM jt"),
-          properties = Map(CatalogTable.VIEW_DEFAULT_DATABASE -> "default",
-            CatalogTable.VIEW_QUERY_OUTPUT_NUM_COLUMNS -> "2",
-            s"${CatalogTable.VIEW_QUERY_OUTPUT_COLUMN_NAME_PREFIX}0" -> "id",
-            s"${CatalogTable.VIEW_QUERY_OUTPUT_COLUMN_NAME_PREFIX}1" -> "id1"))
-        val view2 = CatalogTable(
-          identifier = TableIdentifier("view2", Some(db)),
-          tableType = CatalogTableType.VIEW,
-          storage = CatalogStorageFormat.empty,
-          schema = new StructType().add("m", "long").add("n", "long"),
-          viewOriginalText = Some("SELECT * FROM view1"),
-          viewText = Some("SELECT * FROM view1"),
-          properties = Map(CatalogTable.VIEW_DEFAULT_DATABASE -> db,
-            CatalogTable.VIEW_QUERY_OUTPUT_NUM_COLUMNS -> "2",
-            s"${CatalogTable.VIEW_QUERY_OUTPUT_COLUMN_NAME_PREFIX}0" -> "x",
-            s"${CatalogTable.VIEW_QUERY_OUTPUT_COLUMN_NAME_PREFIX}1" -> "y"))
+        sql(s"create view $db.view1(x, y) as select * from jt")
         activateDatabase(db) {
-          hiveContext.sessionState.catalog.createTable(view1, ignoreIfExists = false)
-          hiveContext.sessionState.catalog.createTable(view2, ignoreIfExists = false)
-          checkAnswer(sql("SELECT m,n FROM view2 ORDER BY m"), (1 to 9).map(i => Row(i, i)))
-          checkAnswer(sql(s"SELECT m,n FROM $db.view2 ORDER BY n"),
+          sql(s"create view view2(m, n) as select * from view1")
+          checkAnswer(sql("SELECT m, n FROM view2 ORDER BY m"), (1 to 9).map(i => Row(i, i)))
+          checkAnswer(sql(s"SELECT m, n FROM $db.view2 ORDER BY n"),
             (1 to 9).map(i => Row(i, i)))
-          checkAnswer(sql(s"SELECT view2.m,view2.n FROM $db.view2 ORDER BY m"),
+          checkAnswer(sql(s"SELECT view2.m, view2.n FROM $db.view2 ORDER BY m"),
             (1 to 9).map(i => Row(i, i)))
-          checkAnswer(sql(s"SELECT $db.view2.m,$db.view2.n FROM $db.view2 ORDER BY m"),
+          checkAnswer(sql(s"SELECT $db.view2.m, $db.view2.n FROM $db.view2 ORDER BY m"),
             (1 to 9).map(i => Row(i, i)))
           checkAnswer(sql("SELECT x,y FROM view1 ORDER BY x"), (1 to 9).map(i => Row(i, i)))
           checkAnswer(sql(s"SELECT x,y FROM $db.view1 ORDER BY x"),
             (1 to 9).map(i => Row(i, i)))
-          checkAnswer(sql(s"SELECT view1.x,view1.y FROM $db.view1 ORDER BY x"),
+          checkAnswer(sql(s"SELECT view1.x, view1.y FROM $db.view1 ORDER BY x"),
             (1 to 9).map(i => Row(i, i)))
-          checkAnswer(sql(s"SELECT $db.view1.x,$db.view1.y FROM $db.view1 ORDER BY x"),
+          checkAnswer(sql(s"SELECT $db.view1.x, $db.view1.y FROM $db.view1 ORDER BY x"),
             (1 to 9).map(i => Row(i, i)))
         }
       }

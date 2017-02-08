@@ -435,7 +435,7 @@ class SessionCatalogSuite extends PlanTest {
     // If we explicitly specify the database, we'll look up the relation in that database
     assert(sessionCatalog.lookupRelation(TableIdentifier("tbl1", Some("db2")))
       == SubqueryAlias(
-      "tbl1", SimpleCatalogRelation(metastoreTable1), None, Option(Seq("db2", "tbl1"))))
+        "tbl1", SimpleCatalogRelation(metastoreTable1), None, Option(Seq("db2", "tbl1"))))
     // Otherwise, we'll first look up a temporary table with the same name
     assert(sessionCatalog.lookupRelation(TableIdentifier("tbl1"))
       == SubqueryAlias("tbl1", tempTable1, None, None))
@@ -480,12 +480,12 @@ class SessionCatalogSuite extends PlanTest {
       child = CatalystSqlParser.parsePlan(metadata.viewText.get))
     comparePlans(sessionCatalog.lookupRelation(TableIdentifier("view1", Some("db3"))),
       SubqueryAlias("view1", view, Some(TableIdentifier("view1", Some("db3"))),
-      Some(Seq("db3", "view1"))))
+        Some(Seq("db3", "view1"))))
     // Look up a view using current database of the session catalog.
     sessionCatalog.setCurrentDatabase("db3")
     comparePlans(sessionCatalog.lookupRelation(TableIdentifier("view1")),
       SubqueryAlias("view1", view, Some(TableIdentifier("view1", Some("db3"))),
-      Some(Seq("db3", "view1"))))
+        Some(Seq("db3", "view1"))))
   }
 
   test("table exists") {
