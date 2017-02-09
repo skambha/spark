@@ -203,7 +203,7 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
     assert(nameParts.length > 1)
 
     val qualifiers = if (attribute.qualifier.isDefined) attribute.qualifier.get else Seq.empty
-    if ( qualifiers.isEmpty ) return None
+    if (qualifiers.isEmpty) return None
 
     // #1: Match full qualifier.
     var result: Option[(Attribute, List[String])] = {

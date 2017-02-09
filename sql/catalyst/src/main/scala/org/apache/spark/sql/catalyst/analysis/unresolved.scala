@@ -257,7 +257,7 @@ case class UnresolvedStar(target: Option[Seq[String]]) extends Star with Unevalu
     } else {
       // Check if it matches the table in the qualifier
       // To handle scenario select t1.* from db1.t1
-      if (nameParts.size == 1) {
+      if (nameParts.size == 1 && qualifierList.nonEmpty) {
         resolver(nameParts(0), qualifierList.last)
       } else {
         false
