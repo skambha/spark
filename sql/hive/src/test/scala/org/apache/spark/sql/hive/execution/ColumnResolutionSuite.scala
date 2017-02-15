@@ -233,8 +233,8 @@ class ColumnResolutionSuite extends QueryTest with SQLTestUtils with TestHiveSin
 
           sql(
             s"""
-               |create table t3(c1 int, c2 int) using csv options
-               |(path "${path}", header "false")
+              |create table t3(c1 int, c2 int) using csv options
+              |(path "${path}", header "false")
             """.stripMargin)
 
           val df2 = Seq((4, 1), (2, 1)).toDF()
@@ -243,8 +243,8 @@ class ColumnResolutionSuite extends QueryTest with SQLTestUtils with TestHiveSin
 
           sql(
             s"""
-               |create table t4(c2 int, c3 int) using csv options
-               |(path "${path2}", header "false")
+              |create table t4(c2 int, c3 int) using csv options
+              |(path "${path2}", header "false")
             """.stripMargin)
 
           checkAnswer(spark.sql("select * from t3 where c1 in " +
