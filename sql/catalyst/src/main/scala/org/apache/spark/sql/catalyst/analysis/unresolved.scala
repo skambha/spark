@@ -252,13 +252,13 @@ case class UnresolvedStar(target: Option[Seq[String]]) extends Star with Unevalu
       resolver: Resolver): Boolean = {
     val qualifierList = if (attribute.qualifier.isDefined) attribute.qualifier.get else Seq.empty
 
-    val matched = if (nameParts.size == qualifierList.size) {
+    val matched = if (nameParts.length == qualifierList.length) {
       (nameParts corresponds qualifierList) (resolver(_, _))
     } else {
       // Check if it matches the table in the qualifier
       // To handle scenario select t1.* from db1.t1
-      if (nameParts.size == 1 && qualifierList.nonEmpty) {
-        resolver(nameParts(0), qualifierList.last)
+      if (nameParts.length == 1 && qualifierList.nonEmpty) {
+        resolver(nameParts.head, qualifierList.last)
       } else {
         false
       }

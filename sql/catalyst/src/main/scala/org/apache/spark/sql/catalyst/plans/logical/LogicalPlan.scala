@@ -210,8 +210,8 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
       val qualifiersMatch = qualifiers.zip(nameParts)
         .forall({ case(qualifierPart, namePart) => resolver(qualifierPart, namePart)})
 
-      if (qualifiersMatch && nameParts.size > qualifiers.size) {
-        val remainingParts = nameParts.slice(qualifiers.size, nameParts.size)
+      if (qualifiersMatch && nameParts.length > qualifiers.length) {
+        val remainingParts = nameParts.slice(qualifiers.length, nameParts.length)
         resolveAsColumn(remainingParts, resolver, attribute)
       } else {
         None
@@ -221,7 +221,7 @@ abstract class LogicalPlan extends QueryPlan[LogicalPlan] with Logging {
     if (result.isEmpty) {
       // #2: test that the first portion in the nameParts matches the table from the qualifier
       result = {
-        if (resolver(nameParts(0), qualifiers.last)) {
+        if (resolver(nameParts.head, qualifiers.last)) {
           resolveAsColumn(nameParts.slice(1, nameParts.length), resolver, attribute)
         }
         else {
